@@ -1,0 +1,28 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: etl-app
+    volumes:
+      - ./app:/app
+    working_dir: /app
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+    command: tail -f /dev/null
+
+  postgres:
+    image: postgres:16
+    container_name: etl-postgres
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
