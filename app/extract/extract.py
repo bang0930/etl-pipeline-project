@@ -94,8 +94,53 @@ def build_raw_record(run_id, base_date, page_no, num_of_rows, status_code, data)
         "payload": data,
     }
 
+INSERT_RAW_RESPONSE_SQL = """
+INSERT INTO raw.stock_price_api_responses (
+    run_id,
+    requested_base_date,
+    page_no,
+    requested_num_of_rows,
+    response_total_count,
+    returned_item_count,
+    http_status,
+    result_code,
+    result_message,
+    payload
+)
+VALUES (
+    %s, %s, %s, %s, %s,
+    %s, %s, %s, %s, %s
+)
+ON CONFLICT (
+    run_id,
+    requested_base_date,
+    page_no
+)
+DO NOTHING
+RETURNING response_id
+"""
+
 def save_raw_response(conn, raw_record):
-    pass
+    with conn.cursor() as cursor:
+        cursor.execute(
+            INSERT_RAW_RESPONSE_SQL,
+            (
+                raw_record["run_id"],
+                raw_record["requested_base_date"],
+                raw_record["page_no"],
+                raw_record["requested_num_of_rows"],
+                raw_record["response_total_count"],
+                raw_record["returned_item_count"],
+                raw_record["http_status"],
+                raw_record["result_code"],
+                raw_record["result_message"],
+                Json(raw_record["payload"]),
+            ),
+        )
+
+        result = cursor.fetchone()
+
+    return result[0] if result else None
 
 def main():
     run_id = str(uuid4())
@@ -111,6 +156,27 @@ def main():
         if key != "payload":
             print(f"{key}: {value}")
 
+    conn = psycopg2.connect(
+            host=os.environ["POSTGRES_HOST"],
+            port=os.environ["POSTGRES_PORT"],
+            database=os.environ["POSTGRES_DB"],
+            user=os.environ["POSTGRES_USER"],
+            password=os.environ["POSTGRES_PASSWORD"],
+        )
+
+    try:
+        response_id = save_raw_response(conn, raw_record)
+        conn.commit()
+
+        if response_id is None:
+            print("이미 저장된 Raw 응답입니다.")
+        else:
+            print(f"Raw 저장 완료: response_id={response_id}")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
