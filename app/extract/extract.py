@@ -1,7 +1,6 @@
 import os
 
 import requests
-import psycopg2
 from psycopg2.extras import Json
 from dotenv import load_dotenv
 from uuid import uuid4
@@ -140,10 +139,9 @@ def save_raw_response(conn, raw_record):
 
     return result[0] if result else None
 
-def main():
+def extract_stock_prices(conn, base_date, num_of_rows=100):
+    """기준일의 전체 주식시세 페이지를 수집해 Raw 계층에 저장한다."""
     run_id = str(uuid4())
-    base_date = "20230601"
-    num_of_rows = 100
 
     # 전체 페이지 수: 첫 페이지 응답의 totalCount를 확인한 뒤 계산
     first_raw_record = collect_stock_price_data(
@@ -165,48 +163,30 @@ def main():
     print(f"response_total_count: {total_count}")
     print(f"total_pages: {total_pages}")
 
-    conn = psycopg2.connect(
-        host=os.environ["POSTGRES_HOST"],
-        port=os.environ["POSTGRES_PORT"],
-        database=os.environ["POSTGRES_DB"],
-        user=os.environ["POSTGRES_USER"],
-        password=os.environ["POSTGRES_PASSWORD"],
-    )
+    saved_page_count = 0
 
-    try:
-        saved_page_count = 0
+    # 첫 페이지는 totalCount를 확인하는 과정에서 이미 호출 -> 바로 저장
+    response_id = save_raw_response(conn, first_raw_record)
+    if response_id is not None:
+        saved_page_count += 1
 
-        # 첫 페이지는 totalCount를 확인하는 과정에서 이미 호출 -> 바로 저장
-        response_id = save_raw_response(conn, first_raw_record)
+    # 첫 페이지의 중복 호출을 피하기 위해 두 번째 페이지부터 수집
+    for page_no in range(2, total_pages + 1):
+        raw_record = collect_stock_price_data(
+            run_id=run_id,
+            base_date=base_date,
+            page_no=page_no,
+            num_of_rows=num_of_rows,
+        )
+        response_id = save_raw_response(conn, raw_record)
+
         if response_id is not None:
             saved_page_count += 1
 
-        # 첫 페이지의 중복 호출을 피하기 위해 두 번째 페이지부터 수집
-        for page_no in range(2, total_pages + 1):
-            raw_record = collect_stock_price_data(
-                run_id=run_id,
-                base_date=base_date,
-                page_no=page_no,
-                num_of_rows=num_of_rows,
-            )
-            response_id = save_raw_response(conn, raw_record)
+    print(
+        f"Raw 저장 준비 완료: saved_pages={saved_page_count}, "
+        f"expected_pages={total_pages}"
+    )
 
-            if response_id is not None:
-                saved_page_count += 1
-
-        # 모든 페이지 호출과 INSERT가 성공한 경우 이번 실행 전체를 확정
-        conn.commit()
-        print(
-            f"Raw 저장 완료: saved_pages={saved_page_count}, "
-            f"expected_pages={total_pages}"
-        )
-    except Exception:
-        # 중간 페이지에서 실패하면 이번 실행에서 INSERT한 모든 페이지를 취소
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-if __name__ == "__main__":
-    main()
+    # Commit은 이 함수를 호출하는 main.py 또는 Airflow Task가 담당한다.
+    return run_id, first_raw_record["requested_base_date"]
