@@ -1,8 +1,3 @@
-import os
-import sys
-import argparse
-import psycopg2
-
 from datetime import datetime
 from decimal import Decimal
 
@@ -190,71 +185,36 @@ def parse_optional_decimal(value):
 
     return Decimal(str(value).strip())
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Raw 데이터를 Staging 형식으로 변환 및 검증"
-    )
-    parser.add_argument(
-        "--run-id",
-        required=True,
-        help="검증할 Raw 수집 실행 ID",
-    )
-    parser.add_argument(
-        "--base-date",
-        required=True,
-        help="기준일자 (예: 2023-06-01)",
-    )
-    args = parser.parse_args()
-
-    print(f"run_id: {args.run_id}")
-    print(f"base_date: {args.base_date}")
-
-    conn = psycopg2.connect(
-        host=os.environ["POSTGRES_HOST"],
-        port=os.environ["POSTGRES_PORT"],
-        database=os.environ["POSTGRES_DB"],
-        user=os.environ["POSTGRES_USER"],
-        password=os.environ["POSTGRES_PASSWORD"],
+def transform_stock_prices(conn, run_id, base_date):
+    """지정한 Raw 실행 데이터를 Staging 적재 형식으로 변환하고 검증한다."""
+    raw_responses = fetch_raw_responses(
+        conn,
+        run_id,
+        base_date,
     )
 
-    try:
-        raw_responses = fetch_raw_responses(
-            conn,
-            args.run_id,
-            args.base_date,
+    if not raw_responses:
+        raise ValueError(
+            "No Raw responses found: "
+            f"run_id={run_id}, base_date={base_date}"
         )
 
-        if not raw_responses:
-            raise ValueError(
-                "No Raw responses found: "
-                f"run_id={args.run_id}, "
-                f"base_date={args.base_date}"
-            )
+    raw_items = extract_items(raw_responses)
+    transformed_items = transform_stock_price_items(raw_items)
+    validated_items = validate_transformed_data(transformed_items)
 
-        raw_items = extract_items(raw_responses)
-        transformed_items = transform_stock_price_items(raw_items)
-        validated_items = validate_transformed_data(transformed_items)
+    expected_item_count = raw_responses[0]["response_total_count"]
+    if len(validated_items) != expected_item_count:
+        raise ValueError(
+            "Item count mismatch: "
+            f"expected={expected_item_count}, "
+            f"actual={len(validated_items)}"
+        )
 
-        expected_item_count = raw_responses[0]["response_total_count"]
-        if len(validated_items) != expected_item_count:
-            raise ValueError(
-                "Item count mismatch: "
-                f"expected={expected_item_count}, "
-                f"actual={len(validated_items)}"
-            )
+    print(f"Raw 페이지 수: {len(raw_responses)}")
+    print(f"추출 item 수: {len(raw_items)}")
+    print(f"변환 item 수: {len(transformed_items)}")
+    print(f"검증 item 수: {len(validated_items)}")
+    print("Transform 검증 완료")
 
-        print(f"Raw 페이지 수: {len(raw_responses)}")
-        print(f"추출 item 수: {len(raw_items)}")
-        print(f"변환 item 수: {len(transformed_items)}")
-        print(f"검증 item 수: {len(validated_items)}")
-        print("Transform 검증 완료")
-
-    except ValueError as error:
-        print(f"Transform 검증 실패: {error}", file=sys.stderr)
-        sys.exit(1)
-
-    finally:
-        conn.close()
-
-if __name__ == "__main__":
-    main()
+    return validated_items
