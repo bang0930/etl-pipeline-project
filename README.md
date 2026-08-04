@@ -35,8 +35,9 @@
 - [x] Staging Batch Upsert 구현
 - [x] Raw → Transform → Validation → Staging Load 통합 실행
 - [x] 동일 데이터 재실행 및 멱등성 검증
-- [ ] 코드 구조 정리 및 단위 테스트
-- [ ] 데이터 품질 검증 확장
+- [x] 코드 구조 정리 및 단위 테스트
+- [x] 데이터 품질 검증 확장
+- [x] PostgreSQL 통합 테스트 및 테스트 DB 자동화
 - [ ] Mart 설계 및 구현
 - [ ] Airflow DAG 구성
 - [ ] Metabase 대시보드 구성
@@ -94,11 +95,11 @@ flowchart LR
 
 - Docker Compose는 Python 애플리케이션과 PostgreSQL의 실행 환경을 구성한다.
 - Extract는 외부 API를 페이지 단위로 호출하고 전체 응답을 Raw 계층에 저장한다.
-- 통합 실행 코드는 지정한 `run_id`의 Raw 데이터를 변환·검증한 뒤 Staging에 Upsert한다.
+- 통합 실행 코드는 API 수집부터 Raw·Staging 품질 검증과 Upsert까지 수행한다.
 - Airflow는 이후 Extract, Transform, Load의 실행 순서, 스케줄, 재시도와 상태를 관리할 예정이다.
 - Metabase는 Mart 데이터를 조회하여 최종 결과를 시각화할 예정이다.
 
-현재 `main.py`는 Extract를 직접 실행하지 않는다. 먼저 `extract.py`로 Raw 데이터를 수집한 후 출력된 `run_id`를 `main.py`에 전달해야 한다.
+현재 `main.py`는 Extract부터 Staging Load와 품질 검증까지 한 번에 실행한다.
 
 ## 데이터 계층
 
@@ -178,6 +179,7 @@ Mart 테이블의 행 기준과 스키마는 실제 대시보드 요구사항을
 | requests | 공공데이터 API 요청 |
 | psycopg2 | PostgreSQL 연결, 트랜잭션 및 Batch Upsert |
 | python-dotenv | 로컬 환경변수 로딩 |
+| pytest | 단위 및 PostgreSQL 통합 테스트 |
 
 ### 의존성에 포함됐지만 아직 사용하지 않음
 
@@ -190,7 +192,6 @@ Mart 테이블의 행 기준과 스키마는 실제 대시보드 요구사항을
 
 | 기술 | 역할 |
 | --- | --- |
-| pytest | 단위 및 통합 테스트 |
 | Apache Airflow | 작업 스케줄링, 의존성, 재시도 및 실행 상태 관리 |
 | Metabase | Mart 데이터 조회 및 대시보드 구성 |
 
@@ -207,6 +208,9 @@ etl-pipeline-project/
 │   │   └── transform.py
 │   ├── load/
 │   │   └── load.py
+│   ├── quality/
+│   │   ├── exceptions.py
+│   │   └── validators.py
 │   └── main.py
 ├── database/
 │   └── init/
@@ -216,9 +220,17 @@ etl-pipeline-project/
 │       └── 004_alter_stock_price_short_code_constraint.sql
 ├── docker/
 │   └── Dockerfile
+├── scripts/
+│   └── test-postgres.sh
+├── tests/
+│   ├── integration/
+│   │   └── test_postgres_pipeline.py
+│   └── test_*.py
 ├── .env.example
 ├── .gitignore
 ├── docker-compose.yml
+├── docker-compose.test.yml
+├── pytest.ini
 ├── README.md
 └── requirements.txt
 ```
@@ -244,42 +256,57 @@ docker compose ps
 
 PostgreSQL 초기화 SQL은 데이터 볼륨을 처음 생성할 때만 자동 실행된다. 기존 볼륨에 새 변경 SQL을 추가한 경우 해당 SQL을 별도로 적용해야 한다.
 
-### 3. 주식시세 데이터 수집 및 Raw 적재
+### 3. ETL 및 품질 검증 통합 실행
 
-현재 `extract.py`에 설정된 기준일자의 전체 페이지를 수집하고 Raw 테이블에 저장한다.
-
-```bash
-docker compose exec app python extract/extract.py
-```
-
-실행 결과에 출력된 `run_id`를 기록한다.
-
-현재 기준일과 페이지당 요청 건수는 `extract.py` 내부에서 설정한다.
-
-### 4. Transform·Validation·Staging Load 통합 실행
-
-Extract 실행에서 생성된 `run_id`와 수집 기준일을 전달한다.
+수집 기준일과 페이지당 요청 건수를 전달한다.
 
 ```bash
 docker compose exec app python main.py \
-  --run-id "<EXTRACT_RUN_ID>" \
-  --base-date "2023-06-01"
+  --base-date "20230601" \
+  --num-of-rows 100
 ```
 
 통합 실행은 다음 순서로 동작한다.
 
 ```text
-Raw 페이지 조회
+API 전체 페이지 수집 및 Raw 적재
+→ Raw 배치 품질 검증
+→ Raw Commit
 → item 추출
 → 컬럼명 및 타입 변환
-→ 데이터 검증
+→ 변환 데이터 품질 검증
 → Staging Batch Upsert
-→ Commit
+→ Staging 적재 품질 검증
+→ Staging Commit
 ```
 
-중간 단계에서 예외가 발생하면 Staging 적재 트랜잭션을 Rollback한다.
+Raw 단계 실패 시 Raw 트랜잭션을, 이후 단계 실패 시 Staging 트랜잭션을 Rollback한다.
 
-### 5. 적재 결과 확인
+### 4. 단위 테스트
+
+```bash
+pytest -q
+```
+
+로컬 단위 테스트에서는 실제 PostgreSQL 통합 테스트를 자동으로 건너뛴다.
+
+### 5. PostgreSQL 통합 테스트
+
+```bash
+./scripts/test-postgres.sh
+```
+
+이 명령은 다음 작업을 자동으로 수행한다.
+
+- `etl_test_db` 테스트 전용 PostgreSQL 컨테이너 실행
+- `database/init/001~004` DDL 적용
+- 전체 단위 테스트와 PostgreSQL 통합 테스트 실행
+- Staging Upsert 멱등성과 제약조건 실패 시 Rollback 검증
+- 테스트 종료 후 컨테이너, 네트워크와 임시 DB 삭제
+
+테스트 DB는 호스트의 `5434` 포트를 사용하며 개발 DB의 데이터와 Volume을 공유하지 않는다.
+
+### 6. 적재 결과 확인
 
 ```sql
 SELECT
@@ -301,13 +328,13 @@ Raw 출처 페이지 수: 28
 
 동일한 `run_id`와 기준일로 통합 실행을 반복해도 Staging 행 수는 2,720건으로 유지된다.
 
-### 6. 로그 확인
+### 7. 로그 확인
 
 ```bash
 docker compose logs -f
 ```
 
-### 7. 컨테이너 종료
+### 8. 컨테이너 종료
 
 ```bash
 docker compose down
@@ -331,25 +358,18 @@ docker compose down
 
 ## 현재 제약사항
 
-- Extract 기준일과 페이지당 요청 건수가 코드에 고정되어 있다.
-- `main.py`는 Extract를 포함하지 않고 기존 Raw 데이터를 기준으로 Transform과 Load를 실행한다.
 - 외부 API 호출 재시도 정책이 아직 없다.
 - DB 초기화 SQL과 기존 DB 변경을 위한 마이그레이션이 분리되어 있지 않다.
-- 자동화된 단위 및 통합 테스트가 아직 없다.
 - 실행 로그가 표준 출력으로만 제공된다.
 
 ## 향후 계획
 
 다음 순서로 프로젝트를 확장한다.
 
-1. 코드 구조와 모듈 역할 정리
-2. 환경설정 및 데이터베이스 연결 코드 분리
-3. Extract 실행 인자화
-4. 단위 테스트 및 통합 테스트 작성
-5. 데이터 품질 검증 확장
-6. Mart 요구사항과 스키마 설계
-7. Mart 집계 및 적재 구현
-8. Airflow DAG와 재시도 정책 구성
-9. Metabase 대시보드 구성
-10. 모니터링, 장애 및 Backfill 테스트
-11. 프로젝트 트러블슈팅과 설계 결정 문서화
+1. 환경설정 및 데이터베이스 연결 코드 분리
+2. Mart 요구사항과 스키마 설계
+3. Mart 집계 및 적재 구현
+4. Airflow DAG와 재시도 정책 구성
+5. Metabase 대시보드 구성
+6. 모니터링, 장애 및 Backfill 테스트
+7. 프로젝트 트러블슈팅과 설계 결정 문서화

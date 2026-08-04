@@ -6,7 +6,12 @@ from dotenv import load_dotenv
 
 from extract.extract import extract_stock_prices
 from load.load import load_stock_prices
-from transform.transform import transform_stock_prices
+from quality.validators import (
+    validate_raw_batch,
+    validate_staging_load,
+    validate_transformed_items,
+)
+from transform.transform import fetch_raw_responses, transform_stock_prices
 
 
 load_dotenv()
@@ -52,9 +57,19 @@ def main():
                 base_date=args.base_date,
                 num_of_rows=args.num_of_rows,
             )
+
+            # 저장된 Raw 페이지 전체를 다시 조회하여 페이지 누락과
+            # API 메타데이터·payload 건수의 일관성을 확인한다.
+            raw_responses = fetch_raw_responses(
+                conn=conn,
+                run_id=run_id,
+                base_date=requested_base_date,
+            )
+            validate_raw_batch(raw_responses)
+
             # Raw 저장을 먼저 확정하여 후속 단계 실패 시에도 재사용할 수 있게 한다.
             conn.commit()
-            print(f"Extract 완료: run_id={run_id}")
+            print(f"Extract 및 Raw 품질 검증 완료: run_id={run_id}")
         except Exception:
             conn.rollback()
             raise
@@ -66,12 +81,22 @@ def main():
                 run_id=run_id,
                 base_date=requested_base_date,
             )
+            validate_transformed_items(
+                validated_items,
+                expected_base_date=requested_base_date,
+            )
+
             loaded_count = load_stock_prices(
                 conn,
                 validated_items,
             )
+
+            # 같은 트랜잭션에서 적재 결과를 확인한다. 검증 실패 시
+            # 아래 except에서 Staging 변경 전체를 rollback한다.
+            validate_staging_load(conn, validated_items)
+
             conn.commit()
-            print(f"Staging 적재 완료: {loaded_count}건")
+            print(f"Staging 적재 및 품질 검증 완료: {loaded_count}건")
         except Exception:
             conn.rollback()
             raise

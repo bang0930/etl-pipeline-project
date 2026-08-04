@@ -45,9 +45,36 @@ def test_main_runs_extract_transform_and_load_in_order(
         events.append(("load", len(items)))
         return len(items)
 
+    def fake_fetch_raw(conn, run_id, base_date):
+        events.append(("fetch_raw", run_id, base_date))
+        return ["raw-response"]
+
+    def fake_validate_raw(raw_responses):
+        events.append(("validate_raw", len(raw_responses)))
+
+    def fake_validate_transformed(items, expected_base_date):
+        events.append(
+            ("validate_transformed", len(items), expected_base_date)
+        )
+
+    def fake_validate_staging(conn, items):
+        events.append(("validate_staging", len(items)))
+
     monkeypatch.setattr(main_module, "extract_stock_prices", fake_extract)
+    monkeypatch.setattr(main_module, "fetch_raw_responses", fake_fetch_raw)
+    monkeypatch.setattr(main_module, "validate_raw_batch", fake_validate_raw)
     monkeypatch.setattr(main_module, "transform_stock_prices", fake_transform)
+    monkeypatch.setattr(
+        main_module,
+        "validate_transformed_items",
+        fake_validate_transformed,
+    )
     monkeypatch.setattr(main_module, "load_stock_prices", fake_load)
+    monkeypatch.setattr(
+        main_module,
+        "validate_staging_load",
+        fake_validate_staging,
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -58,9 +85,13 @@ def test_main_runs_extract_transform_and_load_in_order(
 
     assert events == [
         ("extract", "20230601", 100),
+        ("fetch_raw", "run-1", date(2023, 6, 1)),
+        ("validate_raw", 1),
         "commit",
         ("transform", "run-1", date(2023, 6, 1)),
+        ("validate_transformed", 1, date(2023, 6, 1)),
         ("load", 1),
+        ("validate_staging", 1),
         "commit",
         "close",
     ]
@@ -103,11 +134,20 @@ def test_main_keeps_raw_commit_and_rolls_back_staging_on_transform_failure(
         events.append("extract")
         return "run-2", date(2023, 6, 1)
 
+    def fake_fetch_raw(conn, run_id, base_date):
+        events.append("fetch_raw")
+        return ["raw-response"]
+
+    def fake_validate_raw(raw_responses):
+        events.append("validate_raw")
+
     def failing_transform(conn, run_id, base_date):
         events.append("transform")
         raise ValueError("transform failed")
 
     monkeypatch.setattr(main_module, "extract_stock_prices", fake_extract)
+    monkeypatch.setattr(main_module, "fetch_raw_responses", fake_fetch_raw)
+    monkeypatch.setattr(main_module, "validate_raw_batch", fake_validate_raw)
     monkeypatch.setattr(main_module, "transform_stock_prices", failing_transform)
     monkeypatch.setattr(sys, "argv", ["main.py", "--base-date", "20230601"])
 
@@ -116,6 +156,8 @@ def test_main_keeps_raw_commit_and_rolls_back_staging_on_transform_failure(
 
     assert events == [
         "extract",
+        "fetch_raw",
+        "validate_raw",
         "commit",
         "transform",
         "rollback",
@@ -134,3 +176,105 @@ def test_main_rejects_non_positive_num_of_rows(monkeypatch):
         main_module.main()
 
     assert error.value.code == 2
+
+
+def test_main_rolls_back_raw_when_raw_quality_validation_fails(monkeypatch):
+    events = []
+    conn = FakeConnection(events)
+    monkeypatch.setattr(
+        main_module,
+        "create_database_connection",
+        lambda: conn,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "extract_stock_prices",
+        lambda conn, base_date, num_of_rows: (
+            "run-quality-fail",
+            date(2023, 6, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "fetch_raw_responses",
+        lambda conn, run_id, base_date: ["invalid-raw"],
+    )
+
+    def failing_raw_validation(raw_responses):
+        events.append("validate_raw")
+        raise ValueError("raw quality failed")
+
+    monkeypatch.setattr(
+        main_module,
+        "validate_raw_batch",
+        failing_raw_validation,
+    )
+    monkeypatch.setattr(sys, "argv", ["main.py", "--base-date", "20230601"])
+
+    with pytest.raises(ValueError, match="raw quality failed"):
+        main_module.main()
+
+    assert events == ["validate_raw", "rollback", "close"]
+
+
+def test_main_rolls_back_staging_when_load_quality_validation_fails(
+    monkeypatch,
+    transformed_item,
+):
+    events = []
+    conn = FakeConnection(events)
+    monkeypatch.setattr(
+        main_module,
+        "create_database_connection",
+        lambda: conn,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "extract_stock_prices",
+        lambda conn, base_date, num_of_rows: (
+            "run-staging-quality-fail",
+            date(2023, 6, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "fetch_raw_responses",
+        lambda conn, run_id, base_date: ["raw"],
+    )
+    monkeypatch.setattr(main_module, "validate_raw_batch", lambda rows: None)
+    monkeypatch.setattr(
+        main_module,
+        "transform_stock_prices",
+        lambda conn, run_id, base_date: [transformed_item],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_transformed_items",
+        lambda items, expected_base_date: None,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_stock_prices",
+        lambda conn, items: len(items),
+    )
+
+    def failing_staging_validation(conn, items):
+        events.append("validate_staging")
+        raise ValueError("staging quality failed")
+
+    monkeypatch.setattr(
+        main_module,
+        "validate_staging_load",
+        failing_staging_validation,
+    )
+    monkeypatch.setattr(sys, "argv", ["main.py", "--base-date", "20230601"])
+
+    with pytest.raises(ValueError, match="staging quality failed"):
+        main_module.main()
+
+    assert events == [
+        "commit",
+        "validate_staging",
+        "rollback",
+        "close",
+    ]
