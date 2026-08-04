@@ -1,0 +1,45 @@
+name: etl-pipeline-test
+
+services:
+  postgres-test:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: etl_test_db
+      POSTGRES_USER: etl_test_user
+      POSTGRES_PASSWORD: etl_test_password
+    ports:
+      - "${TEST_POSTGRES_PORT:-5434}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U etl_test_user -d etl_test_db
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  tests:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      POSTGRES_HOST: postgres-test
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: etl_test_db
+      POSTGRES_USER: etl_test_user
+      POSTGRES_PASSWORD: etl_test_password
+      STOCK_API_BASE_URL: https://example.test/api
+      STOCK_API_SERVICE_KEY: test-service-key
+      RUN_POSTGRES_INTEGRATION: "1"
+    volumes:
+      - ./app:/app
+      - ./tests:/tests:ro
+      - ./pytest.ini:/pytest.ini:ro
+    working_dir: /app
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    command: pytest -c /pytest.ini -q -p no:cacheprovider /tests
