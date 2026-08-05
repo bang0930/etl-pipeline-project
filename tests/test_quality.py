@@ -1,10 +1,12 @@
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
 from quality.exceptions import DataQualityError
 from quality.validators import (
     validate_raw_batch,
+    validate_mart_rankings,
     validate_staging_load,
     validate_transformed_items,
 )
@@ -132,16 +134,18 @@ def test_validate_transformed_items_rejects_invalid_short_code(
         validate_transformed_items([item])
 
 
-def test_validate_transformed_items_rejects_high_below_close(
+def test_validate_transformed_items_allows_zero_ohlc_with_close_price(
     transformed_item,
 ):
     item = {
         **transformed_item,
-        "high_price": transformed_item["close_price"] - 1,
+        "open_price": 0,
+        "high_price": 0,
+        "low_price": 0,
+        "close_price": 11400,
     }
 
-    with pytest.raises(DataQualityError, match="고가"):
-        validate_transformed_items([item])
+    assert validate_transformed_items([item]) == [item]
 
 
 class FakeCursor:
@@ -196,3 +200,79 @@ def test_validate_staging_load_rejects_row_count_mismatch(transformed_item):
 
     with pytest.raises(DataQualityError, match="적재 건수"):
         validate_staging_load(conn, [transformed_item])
+
+
+def make_mart_rows(transformed_item):
+    down_row = {
+        "base_date": transformed_item["base_date"],
+        "isin_code": transformed_item["isin_code"],
+        "open_price": 15240,
+        "close_price": 15080,
+        "intraday_price_change": -160,
+        "intraday_change_rate": Decimal("-1.049869"),
+        "movement_direction": "DOWN",
+        "movement_rank": 1,
+        "trading_volume": 38219,
+        "trading_value": 578006510,
+        "trading_volume_rank": 2,
+        "trading_value_rank": 2,
+    }
+    up_row = {
+        "base_date": transformed_item["base_date"],
+        "isin_code": "KR7005930003",
+        "open_price": 14000,
+        "close_price": 15080,
+        "intraday_price_change": 1080,
+        "intraday_change_rate": Decimal("7.714286"),
+        "movement_direction": "UP",
+        "movement_rank": 1,
+        "trading_volume": 100000,
+        "trading_value": 1000000000,
+        "trading_volume_rank": 1,
+        "trading_value_rank": 1,
+    }
+    staging_items = [
+        transformed_item,
+        {
+            **transformed_item,
+            "isin_code": up_row["isin_code"],
+        },
+    ]
+    return [down_row, up_row], staging_items
+
+
+def test_validate_mart_rankings_accepts_valid_rows(transformed_item):
+    mart_rows, staging_items = make_mart_rows(transformed_item)
+
+    assert validate_mart_rankings(
+        mart_rows,
+        staging_items,
+        expected_base_date=date(2023, 6, 1),
+    ) is mart_rows
+
+
+def test_validate_mart_rankings_rejects_wrong_direction(transformed_item):
+    mart_rows, staging_items = make_mart_rows(transformed_item)
+    mart_rows[0]["movement_direction"] = "UP"
+
+    with pytest.raises(DataQualityError, match="등락 방향"):
+        validate_mart_rankings(mart_rows, staging_items)
+
+
+def test_validate_mart_rankings_rejects_wrong_volume_rank(transformed_item):
+    mart_rows, staging_items = make_mart_rows(transformed_item)
+    mart_rows[0]["trading_volume_rank"] = 1
+
+    with pytest.raises(DataQualityError, match="거래량 순위"):
+        validate_mart_rankings(mart_rows, staging_items)
+
+
+def test_validate_mart_rankings_rejects_staging_key_mismatch(transformed_item):
+    mart_rows, staging_items = make_mart_rows(transformed_item)
+    staging_items[1] = {
+        **staging_items[1],
+        "isin_code": "KR7000270009",
+    }
+
+    with pytest.raises(DataQualityError, match="키 집합"):
+        validate_mart_rankings(mart_rows, staging_items)
