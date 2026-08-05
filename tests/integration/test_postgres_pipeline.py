@@ -6,6 +6,7 @@ import pytest
 
 from extract.extract import build_raw_record, save_raw_response
 from load.load import load_stock_prices
+from mart.mart import build_daily_stock_rankings
 from quality.validators import (
     validate_raw_batch,
     validate_staging_load,
@@ -59,6 +60,11 @@ def make_two_item_payload(stock_item, api_response_factory):
         "srtnCd": "005930",
         "isinCd": "KR7005930003",
         "itmsNm": "삼성전자",
+        "mkp": "14000",
+        "hipr": "16000",
+        "lopr": "13000",
+        "trqu": "100000",
+        "trPrc": "1000000000",
     }
     return api_response_factory(
         items=[stock_item, second_item],
@@ -121,11 +127,26 @@ def test_postgres_raw_to_staging_quality_and_idempotency(
         postgres_conn,
         transformed_items,
     )
+
+    mart_rows = build_daily_stock_rankings(
+        postgres_conn,
+        date(2023, 6, 1),
+    )
     postgres_conn.commit()
 
     assert quality_result["row_count"] == 2
     assert quality_result["unique_isin_count"] == 2
     assert quality_result["source_response_count"] == 1
+
+    rows_by_isin = {row["isin_code"]: row for row in mart_rows}
+    assert rows_by_isin["KR700088K015"]["movement_direction"] == "DOWN"
+    assert rows_by_isin["KR7005930003"]["movement_direction"] == "UP"
+    assert rows_by_isin["KR700088K015"]["movement_rank"] == 1
+    assert rows_by_isin["KR7005930003"]["movement_rank"] == 1
+    assert rows_by_isin["KR700088K015"]["trading_volume_rank"] == 2
+    assert rows_by_isin["KR7005930003"]["trading_volume_rank"] == 1
+    assert rows_by_isin["KR700088K015"]["trading_value_rank"] == 2
+    assert rows_by_isin["KR7005930003"]["trading_value_rank"] == 1
 
 
 def test_postgres_constraint_failure_rolls_back_staging_batch(
