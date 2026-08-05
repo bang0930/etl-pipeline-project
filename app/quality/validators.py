@@ -1,4 +1,5 @@
 import re
+from decimal import Decimal
 
 from psycopg2.extras import RealDictCursor
 
@@ -181,20 +182,6 @@ def validate_transformed_items(transformed_items, expected_base_date=None):
         if not ISIN_CODE_PATTERN.fullmatch(isin_code):
             raise DataQualityError(f"ISIN 코드 형식이 올바르지 않습니다: {isin_code}")
 
-        high_price = item["high_price"]
-        low_price = item["low_price"]
-        open_price = item["open_price"]
-        close_price = item["close_price"]
-
-        if high_price < max(open_price, close_price):
-            raise DataQualityError(
-                f"고가가 시가 또는 종가보다 낮습니다: isin_code={isin_code}"
-            )
-        if low_price > min(open_price, close_price):
-            raise DataQualityError(
-                f"저가가 시가 또는 종가보다 높습니다: isin_code={isin_code}"
-            )
-
     return transformed_items
 
 
@@ -243,3 +230,158 @@ def validate_staging_load(conn, transformed_items):
         )
 
     return result
+
+
+def _dense_rank_map(values):
+    """큰 값부터 동일 값에 같은 순위를 부여하는 매핑을 만든다."""
+    return {
+        value: rank
+        for rank, value in enumerate(
+            sorted(set(values), reverse=True),
+            start=1,
+        )
+    }
+
+
+def validate_mart_rankings(
+    mart_rows,
+    staging_items,
+    expected_base_date=None,
+):
+    """Mart의 지표·방향·순위와 Staging 출처를 교차 검증한다."""
+    if not mart_rows:
+        raise DataQualityError("Mart 검증 대상이 비어 있습니다.")
+    if len(mart_rows) != len(staging_items):
+        raise DataQualityError(
+            "Mart와 Staging의 행 수가 다릅니다: "
+            f"mart={len(mart_rows)}, staging={len(staging_items)}"
+        )
+
+    required_fields = {
+        "base_date",
+        "isin_code",
+        "open_price",
+        "close_price",
+        "intraday_price_change",
+        "intraday_change_rate",
+        "movement_direction",
+        "movement_rank",
+        "trading_volume",
+        "trading_value",
+        "trading_volume_rank",
+        "trading_value_rank",
+    }
+
+    mart_keys = set()
+    base_dates = set()
+
+    for row in mart_rows:
+        missing_fields = required_fields.difference(row)
+        if missing_fields:
+            raise DataQualityError(
+                f"Mart 필드가 누락됐습니다: {sorted(missing_fields)}"
+            )
+
+        key = (row["base_date"], row["isin_code"])
+        if key in mart_keys:
+            raise DataQualityError(f"Mart 중복 키가 존재합니다: {key}")
+        mart_keys.add(key)
+        base_dates.add(row["base_date"])
+
+        expected_change = row["close_price"] - row["open_price"]
+        if row["intraday_price_change"] != expected_change:
+            raise DataQualityError(
+                f"Mart 장중 변동액이 올바르지 않습니다: isin_code={row['isin_code']}"
+            )
+
+        if expected_change > 0:
+            expected_direction = "UP"
+        elif expected_change < 0:
+            expected_direction = "DOWN"
+        else:
+            expected_direction = "FLAT"
+
+        if row["movement_direction"] != expected_direction:
+            raise DataQualityError(
+                f"Mart 등락 방향이 올바르지 않습니다: isin_code={row['isin_code']}"
+            )
+
+        if row["open_price"] == 0:
+            if row["intraday_change_rate"] is not None:
+                raise DataQualityError(
+                    "시가가 0인 Mart 행의 변동률은 NULL이어야 합니다: "
+                    f"isin_code={row['isin_code']}"
+                )
+        else:
+            expected_rate = (
+                Decimal(expected_change)
+                / Decimal(row["open_price"])
+                * Decimal("100")
+            )
+            actual_rate = row["intraday_change_rate"]
+            if actual_rate is None or abs(actual_rate - expected_rate) > Decimal(
+                "0.000001"
+            ):
+                raise DataQualityError(
+                    f"Mart 장중 변동률이 올바르지 않습니다: isin_code={row['isin_code']}"
+                )
+
+    staging_keys = {
+        (item["base_date"], item["isin_code"])
+        for item in staging_items
+    }
+    if mart_keys != staging_keys:
+        raise DataQualityError(
+            "Mart와 Staging의 종목 키 집합이 일치하지 않습니다."
+        )
+
+    if len(base_dates) != 1:
+        raise DataQualityError(
+            f"Mart 배치에 여러 기준일자가 섞여 있습니다: {base_dates}"
+        )
+    if expected_base_date is not None and base_dates != {expected_base_date}:
+        raise DataQualityError(
+            "요청 기준일자와 Mart 기준일자가 다릅니다: "
+            f"expected={expected_base_date}, actual={next(iter(base_dates))}"
+        )
+
+    volume_ranks = _dense_rank_map(
+        row["trading_volume"] for row in mart_rows
+    )
+    value_ranks = _dense_rank_map(
+        row["trading_value"] for row in mart_rows
+    )
+
+    movement_ranks = {}
+    for direction in ("UP", "DOWN"):
+        rates = [
+            abs(row["intraday_change_rate"])
+            for row in mart_rows
+            if row["movement_direction"] == direction
+            and row["intraday_change_rate"] is not None
+        ]
+        movement_ranks[direction] = _dense_rank_map(rates)
+
+    for row in mart_rows:
+        if row["trading_volume_rank"] != volume_ranks[row["trading_volume"]]:
+            raise DataQualityError(
+                f"Mart 거래량 순위가 올바르지 않습니다: isin_code={row['isin_code']}"
+            )
+        if row["trading_value_rank"] != value_ranks[row["trading_value"]]:
+            raise DataQualityError(
+                f"Mart 거래대금 순위가 올바르지 않습니다: isin_code={row['isin_code']}"
+            )
+
+        rate = row["intraday_change_rate"]
+        direction = row["movement_direction"]
+        if direction in ("UP", "DOWN") and rate is not None:
+            expected_rank = movement_ranks[direction][abs(rate)]
+        else:
+            expected_rank = None
+
+        if row["movement_rank"] != expected_rank:
+            raise DataQualityError(
+                f"Mart 등락 순위가 올바르지 않습니다: isin_code={row['isin_code']}"
+            )
+
+    return mart_rows

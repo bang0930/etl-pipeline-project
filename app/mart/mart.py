@@ -40,6 +40,7 @@ ranked AS (
             THEN DENSE_RANK() OVER (
                 PARTITION BY base_date, movement_direction
                 ORDER BY ABS(intraday_change_rate) DESC
+                NULLS LAST
             )
             ELSE NULL
         END AS movement_rank,

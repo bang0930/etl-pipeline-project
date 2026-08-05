@@ -42,6 +42,7 @@ def test_load_daily_stock_rankings_executes_ranked_upsert():
     query, params = cursor.executed
     assert loaded_count == 2
     assert "DENSE_RANK()" in query
+    assert "NULLS LAST" in query
     assert "ON CONFLICT (base_date, isin_code)" in query
     assert params == ("2023-06-01",)
 

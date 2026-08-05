@@ -60,6 +60,15 @@ def test_main_runs_extract_transform_and_load_in_order(
     def fake_validate_staging(conn, items):
         events.append(("validate_staging", len(items)))
 
+    def fake_build_mart(conn, base_date):
+        events.append(("build_mart", base_date))
+        return ["mart-row"]
+
+    def fake_validate_mart(rows, items, expected_base_date):
+        events.append(
+            ("validate_mart", len(rows), len(items), expected_base_date)
+        )
+
     monkeypatch.setattr(main_module, "extract_stock_prices", fake_extract)
     monkeypatch.setattr(main_module, "fetch_raw_responses", fake_fetch_raw)
     monkeypatch.setattr(main_module, "validate_raw_batch", fake_validate_raw)
@@ -74,6 +83,16 @@ def test_main_runs_extract_transform_and_load_in_order(
         main_module,
         "validate_staging_load",
         fake_validate_staging,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "build_daily_stock_rankings",
+        fake_build_mart,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_mart_rankings",
+        fake_validate_mart,
     )
     monkeypatch.setattr(
         sys,
@@ -92,6 +111,9 @@ def test_main_runs_extract_transform_and_load_in_order(
         ("validate_transformed", 1, date(2023, 6, 1)),
         ("load", 1),
         ("validate_staging", 1),
+        "commit",
+        ("build_mart", date(2023, 6, 1)),
+        ("validate_mart", 1, 1, date(2023, 6, 1)),
         "commit",
         "close",
     ]
@@ -275,6 +297,80 @@ def test_main_rolls_back_staging_when_load_quality_validation_fails(
     assert events == [
         "commit",
         "validate_staging",
+        "rollback",
+        "close",
+    ]
+
+
+def test_main_keeps_staging_commit_and_rolls_back_failed_mart(
+    monkeypatch,
+    transformed_item,
+):
+    events = []
+    conn = FakeConnection(events)
+    monkeypatch.setattr(
+        main_module,
+        "create_database_connection",
+        lambda: conn,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "extract_stock_prices",
+        lambda conn, base_date, num_of_rows: (
+            "run-mart-fail",
+            date(2023, 6, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "fetch_raw_responses",
+        lambda conn, run_id, base_date: ["raw"],
+    )
+    monkeypatch.setattr(main_module, "validate_raw_batch", lambda rows: None)
+    monkeypatch.setattr(
+        main_module,
+        "transform_stock_prices",
+        lambda conn, run_id, base_date: [transformed_item],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_transformed_items",
+        lambda items, expected_base_date: None,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_stock_prices",
+        lambda conn, items: len(items),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_staging_load",
+        lambda conn, items: None,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "build_daily_stock_rankings",
+        lambda conn, base_date: ["mart-row"],
+    )
+
+    def failing_mart_validation(rows, items, expected_base_date):
+        events.append("validate_mart")
+        raise ValueError("mart quality failed")
+
+    monkeypatch.setattr(
+        main_module,
+        "validate_mart_rankings",
+        failing_mart_validation,
+    )
+    monkeypatch.setattr(sys, "argv", ["main.py", "--base-date", "20230601"])
+
+    with pytest.raises(ValueError, match="mart quality failed"):
+        main_module.main()
+
+    assert events == [
+        "commit",
+        "commit",
+        "validate_mart",
         "rollback",
         "close",
     ]

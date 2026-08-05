@@ -6,7 +6,9 @@ from dotenv import load_dotenv
 
 from extract.extract import extract_stock_prices
 from load.load import load_stock_prices
+from mart.mart import build_daily_stock_rankings
 from quality.validators import (
+    validate_mart_rankings,
     validate_raw_batch,
     validate_staging_load,
     validate_transformed_items,
@@ -97,6 +99,24 @@ def main():
 
             conn.commit()
             print(f"Staging 적재 및 품질 검증 완료: {loaded_count}건")
+        except Exception:
+            conn.rollback()
+            raise
+
+        # Mart: 확정된 Staging 데이터를 대시보드용 지표와 순위로 계산한다.
+        try:
+            mart_rows = build_daily_stock_rankings(
+                conn=conn,
+                base_date=requested_base_date,
+            )
+            validate_mart_rankings(
+                mart_rows,
+                validated_items,
+                expected_base_date=requested_base_date,
+            )
+
+            conn.commit()
+            print(f"Mart 적재 및 품질 검증 완료: {len(mart_rows)}건")
         except Exception:
             conn.rollback()
             raise
