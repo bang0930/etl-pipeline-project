@@ -3,6 +3,8 @@ from decimal import Decimal
 
 from psycopg2.extras import RealDictCursor
 
+from quality.exceptions import PaginationConsistencyError
+
 
 FETCH_RAW_RESPONSES_SQL = """
 SELECT
@@ -138,7 +140,10 @@ def validate_transformed_data(transformed_items):
         # Staging 기본키와 동일한 기준으로 중복 확인
         item_key = (item["base_date"], item["isin_code"])
         if item_key in seen_keys:
-            raise ValueError(f"Duplicate key found: {item_key}")
+            raise PaginationConsistencyError(
+                "Duplicate stock key detected across API pages: "
+                f"key=({item['base_date']}, {item['isin_code']})."
+            )
         seen_keys.add(item_key)
 
         for field in non_negative_fields:
@@ -204,10 +209,10 @@ def transform_stock_prices(conn, run_id, base_date):
 
     expected_item_count = raw_responses[0]["response_total_count"]
     if len(transformed_items) != expected_item_count:
-        raise ValueError(
-            "Item count mismatch: "
+        raise PaginationConsistencyError(
+            "Stock item count mismatch across API pages: "
             f"expected={expected_item_count}, "
-            f"actual={len(transformed_items)}"
+            f"actual={len(transformed_items)}."
         )
 
     print(f"Raw 페이지 수: {len(raw_responses)}")

@@ -5,7 +5,7 @@ from psycopg2.extras import RealDictCursor
 
 from transform.transform import validate_transformed_data
 
-from quality.exceptions import DataQualityError
+from quality.exceptions import DataQualityError, PaginationConsistencyError
 
 
 SHORT_CODE_PATTERN = re.compile(r"^[A-Z0-9]{6}$")
@@ -130,23 +130,24 @@ def validate_raw_batch(raw_responses):
             f"Raw 배치에 여러 기준일자가 섞여 있습니다: {base_dates}"
         )
     if len(total_counts) != 1:
-        raise DataQualityError(
-            f"Raw 페이지별 response_total_count가 다릅니다: {total_counts}"
+        raise PaginationConsistencyError(
+            "Raw 페이지별 response_total_count가 다릅니다: "
+            f"{total_counts}."
         )
 
     sorted_pages = sorted(page_numbers)
     expected_pages = list(range(1, sorted_pages[-1] + 1))
     if sorted_pages != expected_pages:
-        raise DataQualityError(
-            f"Raw 페이지가 중복되거나 누락됐습니다: "
-            f"expected={expected_pages}, actual={sorted_pages}"
+        raise PaginationConsistencyError(
+            "Raw 페이지가 중복되거나 누락됐습니다: "
+            f"expected={expected_pages}, actual={sorted_pages}."
         )
 
     expected_item_total = next(iter(total_counts))
     if returned_item_total != expected_item_total:
-        raise DataQualityError(
-            f"Raw 전체 item 수가 일치하지 않습니다: "
-            f"expected={expected_item_total}, actual={returned_item_total}"
+        raise PaginationConsistencyError(
+            "Raw 전체 item 수가 일치하지 않습니다: "
+            f"expected={expected_item_total}, actual={returned_item_total}."
         )
 
     return raw_responses
@@ -159,6 +160,9 @@ def validate_transformed_items(transformed_items, expected_base_date=None):
 
     try:
         validate_transformed_data(transformed_items)
+    except PaginationConsistencyError:
+        # 재시도 가능한 페이지 정합성 오류 타입을 유지한다.
+        raise
     except ValueError as error:
         raise DataQualityError(str(error)) from error
 

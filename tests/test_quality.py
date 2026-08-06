@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from quality.exceptions import DataQualityError
+from quality.exceptions import DataQualityError, PaginationConsistencyError
 from quality.validators import (
     validate_raw_batch,
     validate_mart_rankings,
@@ -81,8 +81,11 @@ def test_validate_raw_batch_rejects_missing_page(
         ),
     ]
 
-    with pytest.raises(DataQualityError, match="중복되거나 누락"):
+    with pytest.raises(PaginationConsistencyError) as error:
         validate_raw_batch(raw_responses)
+
+    assert "중복되거나 누락" in str(error.value)
+    assert "Retry the same base date" in str(error.value)
 
 
 def test_validate_raw_batch_rejects_payload_count_mismatch(
@@ -112,8 +115,47 @@ def test_validate_raw_batch_rejects_total_item_count_mismatch(
         total_count=2,
     )
 
-    with pytest.raises(DataQualityError, match="전체 item 수"):
+    with pytest.raises(PaginationConsistencyError) as error:
         validate_raw_batch([raw_response])
+
+    assert "전체 item 수" in str(error.value)
+    assert "Retry the same base date" in str(error.value)
+
+
+def test_validate_raw_batch_classifies_changed_total_count(
+    stock_item,
+    api_response_factory,
+):
+    second_item = {**stock_item, "isinCd": "KR7005930003"}
+    raw_responses = [
+        make_raw_response(
+            api_response_factory,
+            page_no=1,
+            items=[stock_item],
+            total_count=2,
+        ),
+        make_raw_response(
+            api_response_factory,
+            page_no=2,
+            items=[second_item],
+            total_count=3,
+        ),
+    ]
+
+    with pytest.raises(PaginationConsistencyError) as error:
+        validate_raw_batch(raw_responses)
+
+    assert "response_total_count가 다릅니다" in str(error.value)
+    assert "Retry the same base date" in str(error.value)
+
+
+def test_validate_transformed_items_preserves_pagination_error(
+    transformed_item,
+):
+    duplicate = {**transformed_item, "source_response_id": 2}
+
+    with pytest.raises(PaginationConsistencyError):
+        validate_transformed_items([transformed_item, duplicate])
 
 
 def test_validate_transformed_items_accepts_valid_batch(transformed_item):
