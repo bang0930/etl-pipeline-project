@@ -5,8 +5,11 @@ import psycopg2
 import pytest
 
 from extract.extract import build_raw_record, save_raw_response
-from load.load import load_stock_prices
-from mart.mart import build_daily_stock_rankings
+from load.load import delete_stock_prices_for_date, load_stock_prices
+from mart.mart import (
+    build_daily_stock_rankings,
+    delete_daily_stock_rankings_for_date,
+)
 from quality.validators import (
     validate_mart_rankings,
     validate_raw_batch,
@@ -104,7 +107,22 @@ def save_test_raw_batch(
     return run_id
 
 
-def test_postgres_raw_to_staging_quality_and_idempotency(
+def replace_daily_snapshot(conn, transformed_items):
+    base_date = transformed_items[0]["base_date"]
+    delete_daily_stock_rankings_for_date(conn, base_date)
+    delete_stock_prices_for_date(conn, base_date)
+    loaded_count = load_stock_prices(conn, transformed_items)
+    quality_result = validate_staging_load(conn, transformed_items)
+    mart_rows = build_daily_stock_rankings(conn, base_date)
+    validate_mart_rankings(
+        mart_rows,
+        transformed_items,
+        expected_base_date=base_date,
+    )
+    return loaded_count, quality_result, mart_rows
+
+
+def test_postgres_recollection_replaces_staging_and_mart_snapshot(
     postgres_conn,
     stock_item,
     api_response_factory,
@@ -133,36 +151,13 @@ def test_postgres_raw_to_staging_quality_and_idempotency(
         expected_base_date=date(2023, 6, 1),
     )
 
-    assert load_stock_prices(postgres_conn, transformed_items) == 3
-    assert load_stock_prices(postgres_conn, transformed_items) == 3
-
-    quality_result = validate_staging_load(
+    loaded_count, quality_result, mart_rows = replace_daily_snapshot(
         postgres_conn,
         transformed_items,
-    )
-
-    mart_rows = build_daily_stock_rankings(
-        postgres_conn,
-        date(2023, 6, 1),
-    )
-    validate_mart_rankings(
-        mart_rows,
-        transformed_items,
-        expected_base_date=date(2023, 6, 1),
-    )
-
-    # 동일 기준일을 다시 계산해도 Mart 행 수와 키는 유지되어야 한다.
-    rerun_mart_rows = build_daily_stock_rankings(
-        postgres_conn,
-        date(2023, 6, 1),
-    )
-    validate_mart_rankings(
-        rerun_mart_rows,
-        transformed_items,
-        expected_base_date=date(2023, 6, 1),
     )
     postgres_conn.commit()
 
+    assert loaded_count == 3
     assert quality_result["row_count"] == 3
     assert quality_result["unique_isin_count"] == 3
     assert quality_result["source_response_count"] == 1
@@ -178,7 +173,36 @@ def test_postgres_raw_to_staging_quality_and_idempotency(
     assert rows_by_isin["KR7005930003"]["trading_volume_rank"] == 1
     assert rows_by_isin["KR700088K015"]["trading_value_rank"] == 2
     assert rows_by_isin["KR7005930003"]["trading_value_rank"] == 1
-    assert len(rerun_mart_rows) == 3
+    assert len(mart_rows) == 3
+
+    # 같은 기준일의 재수집 결과가 줄면 이전 종목이 남지 않아야 한다.
+    reduced_items = transformed_items[:2]
+    loaded_count, quality_result, mart_rows = replace_daily_snapshot(
+        postgres_conn,
+        reduced_items,
+    )
+    postgres_conn.commit()
+
+    assert loaded_count == 2
+    assert quality_result["row_count"] == 2
+    assert quality_result["unique_isin_count"] == 2
+    assert len(mart_rows) == 2
+
+    remaining_isins = {item["isin_code"] for item in reduced_items}
+    with postgres_conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT isin_code FROM staging.stock_prices WHERE base_date = %s",
+            (date(2023, 6, 1),),
+        )
+        staging_isins = {row[0] for row in cursor.fetchall()}
+        cursor.execute(
+            "SELECT isin_code FROM mart.daily_stock_rankings WHERE base_date = %s",
+            (date(2023, 6, 1),),
+        )
+        mart_isins = {row[0] for row in cursor.fetchall()}
+
+    assert staging_isins == remaining_isins
+    assert mart_isins == remaining_isins
 
 
 def test_postgres_constraint_failure_rolls_back_staging_batch(
@@ -199,11 +223,23 @@ def test_postgres_constraint_failure_rolls_back_staging_batch(
         run_id,
         date(2023, 6, 1),
     )
+    replace_daily_snapshot(postgres_conn, transformed_items)
+    postgres_conn.commit()
+
     # 길이는 VARCHAR(6)에 맞지만 허용 문자 규칙을 위반해 CHECK를 발생시킨다.
-    transformed_items[0]["short_code"] = "!!!!!!"
+    invalid_items = [{**item} for item in transformed_items]
+    invalid_items[0]["short_code"] = "!!!!!!"
 
     with pytest.raises(psycopg2.errors.CheckViolation):
-        load_stock_prices(postgres_conn, transformed_items)
+        delete_daily_stock_rankings_for_date(
+            postgres_conn,
+            date(2023, 6, 1),
+        )
+        delete_stock_prices_for_date(
+            postgres_conn,
+            date(2023, 6, 1),
+        )
+        load_stock_prices(postgres_conn, invalid_items)
     postgres_conn.rollback()
 
     with postgres_conn.cursor() as cursor:
@@ -213,5 +249,12 @@ def test_postgres_constraint_failure_rolls_back_staging_batch(
             (date(2023, 6, 1),),
         )
         staging_count = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT COUNT(*) FROM mart.daily_stock_rankings "
+            "WHERE base_date = %s",
+            (date(2023, 6, 1),),
+        )
+        mart_count = cursor.fetchone()[0]
 
-    assert staging_count == 0
+    assert staging_count == 3
+    assert mart_count == 3

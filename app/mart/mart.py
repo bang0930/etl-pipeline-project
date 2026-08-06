@@ -130,6 +130,18 @@ WHERE base_date = %s
 ORDER BY isin_code
 """
 
+DELETE_DAILY_STOCK_RANKINGS_SQL = """
+DELETE FROM mart.daily_stock_rankings
+WHERE base_date = %s
+"""
+
+
+def delete_daily_stock_rankings_for_date(conn, base_date):
+    """Staging 교체 전에 기준일의 기존 Mart 스냅샷을 삭제한다."""
+    with conn.cursor() as cursor:
+        cursor.execute(DELETE_DAILY_STOCK_RANKINGS_SQL, (base_date,))
+        return cursor.rowcount
+
 
 def load_daily_stock_rankings(conn, base_date):
     """한 기준일의 Staging 데이터를 계산해 Mart에 Upsert한다."""

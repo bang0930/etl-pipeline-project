@@ -12,7 +12,7 @@ def test_load_stock_prices_returns_zero_for_empty_items():
     conn.cursor.assert_not_called()
 
 
-def test_load_stock_prices_executes_batch_upsert(
+def test_load_stock_prices_executes_batch_insert(
     monkeypatch,
     transformed_item,
 ):
@@ -41,9 +41,27 @@ def test_load_stock_prices_executes_batch_upsert(
     )
 
 
-def test_load_sql_uses_primary_key_upsert():
+def test_load_sql_uses_plain_insert_after_snapshot_delete():
     normalized_sql = " ".join(load_module.INSERT_STOCK_PRICE_SQL.split())
 
-    assert "ON CONFLICT (base_date, isin_code)" in normalized_sql
-    assert "DO UPDATE SET" in normalized_sql
-    assert "processed_at = NOW()" in normalized_sql
+    assert "INSERT INTO staging.stock_prices" in normalized_sql
+    assert "ON CONFLICT" not in normalized_sql
+
+
+def test_delete_stock_prices_for_date_executes_date_delete():
+    cursor = Mock(rowcount=3)
+    cursor_context = MagicMock()
+    cursor_context.__enter__.return_value = cursor
+    conn = Mock()
+    conn.cursor.return_value = cursor_context
+
+    deleted_count = load_module.delete_stock_prices_for_date(
+        conn,
+        "2023-06-01",
+    )
+
+    assert deleted_count == 3
+    cursor.execute.assert_called_once_with(
+        load_module.DELETE_STOCK_PRICES_SQL,
+        ("2023-06-01",),
+    )

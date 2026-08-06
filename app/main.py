@@ -5,8 +5,11 @@ import psycopg2
 from dotenv import load_dotenv
 
 from extract.extract import extract_stock_prices
-from load.load import load_stock_prices
-from mart.mart import build_daily_stock_rankings
+from load.load import delete_stock_prices_for_date, load_stock_prices
+from mart.mart import (
+    build_daily_stock_rankings,
+    delete_daily_stock_rankings_for_date,
+)
 from quality.validators import (
     validate_mart_rankings,
     validate_raw_batch,
@@ -76,47 +79,57 @@ def main():
             conn.rollback()
             raise
 
-        # Transform + Load: 방금 수집한 Raw 데이터를 변환하여 Staging에 적재한다.
+        # Transform + Publish: 기준일의 Staging과 Mart를 하나의 트랜잭션에서
+        # 교체한다. 실패하면 삭제와 신규 적재가 모두 rollback된다.
         try:
-            validated_items = transform_stock_prices(
+            transformed_items = transform_stock_prices(
                 conn=conn,
                 run_id=run_id,
                 base_date=requested_base_date,
             )
+
+            # 정상 응답이 0건이면 휴장일 또는 원본의 일시적인 빈 결과일 수 있다.
+            # 기존 Staging/Mart 스냅샷을 보존하고 Raw 수집 이력만 남긴다.
+            if not transformed_items:
+                print(
+                    "수집 데이터가 0건이므로 기존 Staging/Mart를 유지합니다: "
+                    f"base_date={requested_base_date}"
+                )
+                return
+
             validate_transformed_items(
-                validated_items,
+                transformed_items,
                 expected_base_date=requested_base_date,
             )
 
+            # Mart가 Staging을 FK로 참조하므로 반드시 Mart부터 삭제한다.
+            delete_daily_stock_rankings_for_date(conn, requested_base_date)
+            delete_stock_prices_for_date(conn, requested_base_date)
+
             loaded_count = load_stock_prices(
                 conn,
-                validated_items,
+                transformed_items,
             )
 
             # 같은 트랜잭션에서 적재 결과를 확인한다. 검증 실패 시
-            # 아래 except에서 Staging 변경 전체를 rollback한다.
-            validate_staging_load(conn, validated_items)
+            # 아래 except에서 Staging과 Mart 변경 전체를 rollback한다.
+            validate_staging_load(conn, transformed_items)
 
-            conn.commit()
-            print(f"Staging 적재 및 품질 검증 완료: {loaded_count}건")
-        except Exception:
-            conn.rollback()
-            raise
-
-        # Mart: 확정된 Staging 데이터를 대시보드용 지표와 순위로 계산한다.
-        try:
             mart_rows = build_daily_stock_rankings(
                 conn=conn,
                 base_date=requested_base_date,
             )
             validate_mart_rankings(
                 mart_rows,
-                validated_items,
+                transformed_items,
                 expected_base_date=requested_base_date,
             )
 
             conn.commit()
-            print(f"Mart 적재 및 품질 검증 완료: {len(mart_rows)}건")
+            print(
+                "Staging/Mart 기준일 스냅샷 교체 완료: "
+                f"staging={loaded_count}건, mart={len(mart_rows)}건"
+            )
         except Exception:
             conn.rollback()
             raise
