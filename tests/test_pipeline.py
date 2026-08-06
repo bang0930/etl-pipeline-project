@@ -217,6 +217,89 @@ def test_main_rejects_non_positive_num_of_rows(monkeypatch):
     assert error.value.code == 2
 
 
+def test_main_runs_inclusive_date_range(monkeypatch):
+    events = []
+    conn = FakeConnection(events)
+    monkeypatch.setattr(
+        main_module,
+        "create_database_connection",
+        lambda: conn,
+    )
+
+    def fake_run_pipeline_for_date(conn, base_date, num_of_rows):
+        events.append(("run_date", base_date, num_of_rows))
+
+    monkeypatch.setattr(
+        main_module,
+        "run_pipeline_for_date",
+        fake_run_pipeline_for_date,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--base-date",
+            "20230601",
+            "--end-date",
+            "20230603",
+            "--num-of-rows",
+            "50",
+        ],
+    )
+
+    main_module.main()
+
+    assert events == [
+        ("run_date", date(2023, 6, 1), 50),
+        ("run_date", date(2023, 6, 2), 50),
+        ("run_date", date(2023, 6, 3), 50),
+        "close",
+    ]
+
+
+def test_main_rejects_end_date_before_base_date(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "create_database_connection",
+        lambda: pytest.fail("유효하지 않은 날짜 범위에서는 DB에 연결하면 안 됩니다."),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--base-date",
+            "20230603",
+            "--end-date",
+            "20230601",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        main_module.main()
+
+    assert error.value.code == 2
+
+
+def test_main_rejects_invalid_base_date_format(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "create_database_connection",
+        lambda: pytest.fail("유효하지 않은 날짜는 DB에 연결하면 안 됩니다."),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["main.py", "--base-date", "2023-06-01"],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        main_module.main()
+
+    assert error.value.code == 2
+
+
 def test_main_rolls_back_raw_when_raw_quality_validation_fails(monkeypatch):
     events = []
     conn = FakeConnection(events)
@@ -457,4 +540,4 @@ def test_main_preserves_existing_snapshot_when_api_returns_zero_items(monkeypatc
 
     main_module.main()
 
-    assert events == ["commit", "close"]
+    assert events == ["commit", "rollback", "close"]
