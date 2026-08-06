@@ -9,7 +9,7 @@
 단순히 API 응답을 데이터베이스에 저장하는 데 그치지 않고 다음 조건을 만족하는 운영 가능한 파이프라인을 만드는 것을 목표로 한다.
 
 - Raw 계층에 실행별 수집 이력과 원본 API 응답을 보존한다.
-- Staging과 Mart 계층에서는 고유 키와 Upsert를 통해 재실행 시 중복 데이터가 발생하지 않도록 한다.
+- Staging과 Mart 계층은 기준일 단위로 교체하여 재수집 결과에 없는 과거 행이 남지 않도록 한다.
 - 원본 데이터와 가공된 데이터의 출처를 추적할 수 있다.
 - 데이터의 타입, 형식, 키와 품질을 단계별로 검증한다.
 - 작업 실패 시 트랜잭션을 Rollback하고 오류 원인을 확인할 수 있다.
@@ -27,18 +27,19 @@
 - [x] Docker 기반 Python·PostgreSQL 개발 환경 구성
 - [x] 데이터 소스 선정 및 API 응답 분석
 - [x] Raw·Staging·Mart 데이터 계층 설계
-- [x] Raw 및 Staging 스키마 구현
+- [x] Raw·Staging·Mart 스키마 구현
 - [x] 지정 기준일의 전체 API 페이지 수집
 - [x] API 응답과 수집 메타데이터 Raw 적재
 - [x] Raw 응답 item 추출 및 타입 변환
 - [x] 필수값·중복·값 범위 데이터 검증
-- [x] Staging Batch Upsert 구현
-- [x] Raw → Transform → Validation → Staging Load 통합 실행
-- [x] 동일 데이터 재실행 및 멱등성 검증
+- [x] Staging 기준일 스냅샷 교체 구현
+- [x] Raw → Transform → Validation → Staging → Mart 통합 실행
+- [x] 재수집 정합성 및 트랜잭션 멱등성 검증
 - [x] 코드 구조 정리 및 단위 테스트
 - [x] 데이터 품질 검증 확장
 - [x] PostgreSQL 통합 테스트 및 테스트 DB 자동화
-- [ ] Mart 설계 및 구현
+- [x] Mart 설계 및 구현
+- [x] 기간 Backfill 실행 지원
 - [ ] Airflow DAG 구성
 - [ ] Metabase 대시보드 구성
 - [ ] 모니터링, 장애 및 재시도 테스트
@@ -77,11 +78,11 @@ flowchart LR
     subgraph POSTGRES["PostgreSQL"]
         RAW["Raw<br/>원본 응답과 수집 기록"]
         STAGING["Staging<br/>정제 및 표준화 데이터"]
-        MART["Mart<br/>분석용 데이터<br/>(예정)"]
+        MART["Mart<br/>일별 종목 지표와 순위"]
     end
 
     TRANSFORM["Transform·Validation<br/>Python"]
-    LOAD["Batch Upsert<br/>Python·SQL"]
+    LOAD["기준일 스냅샷 교체<br/>Python·SQL"]
     METABASE["Metabase<br/>(예정)"]
 
     SOURCE --> EXTRACT
@@ -89,13 +90,13 @@ flowchart LR
     RAW --> TRANSFORM
     TRANSFORM --> LOAD
     LOAD --> STAGING
-    STAGING -. "집계·모델링 예정" .-> MART
+    STAGING --> MART
     MART -. "조회·시각화 예정" .-> METABASE
 ```
 
 - Docker Compose는 Python 애플리케이션과 PostgreSQL의 실행 환경을 구성한다.
 - Extract는 외부 API를 페이지 단위로 호출하고 전체 응답을 Raw 계층에 저장한다.
-- 통합 실행 코드는 API 수집부터 Raw·Staging 품질 검증과 Upsert까지 수행한다.
+- 통합 실행 코드는 API 수집부터 Raw·Staging·Mart 적재와 품질 검증까지 수행한다.
 - Airflow는 이후 Extract, Transform, Load의 실행 순서, 스케줄, 재시도와 상태를 관리할 예정이다.
 - Metabase는 Mart 데이터를 조회하여 최종 결과를 시각화할 예정이다.
 
@@ -152,19 +153,32 @@ base_date × isin_code
 - 등락률을 `NUMERIC`으로 변환
 - 필수값, 중복 키, 음수 불가 값 및 고가·저가 관계 검증
 - `source_response_id`를 통한 Raw 페이지 출처 추적
-- 기본 키 충돌 시 `ON CONFLICT DO UPDATE`로 갱신
+- 같은 기준일의 Mart와 Staging 데이터를 삭제한 뒤 신규 결과를 일괄 삽입
+- 교체 작업은 하나의 트랜잭션에서 수행하여 실패 시 기존 스냅샷을 복원
 
 ### Mart
 
-Staging 데이터를 기반으로 분석과 시각화 목적에 맞는 지표 및 집계 데이터를 제공할 계층이다.
+Staging 데이터를 기반으로 분석과 시각화 목적에 맞는 지표 및 순위를 제공하는 계층이다.
 
-초기 분석 목표는 다음과 같다.
+구현 테이블:
 
-- 종목별 일별 종가 추이
-- 일별 거래대금 상위 종목
-- 종목별 거래량 및 등락률 변화
+```text
+mart.daily_stock_rankings
+```
 
-Mart 테이블의 행 기준과 스키마는 실제 대시보드 요구사항을 바탕으로 확정할 예정이다.
+한 행의 기준 및 기본 키:
+
+```text
+base_date × isin_code
+```
+
+현재 제공하는 분석 값은 다음과 같다.
+
+- 시가 대비 종가의 장중 가격 변화와 변화율
+- 상승·하락·보합 방향
+- 상승·하락 그룹별 변동률 순위
+- 일별 거래량 순위
+- 일별 거래대금 순위
 
 ## 기술 스택
 
@@ -177,7 +191,7 @@ Mart 테이블의 행 기준과 스키마는 실제 대시보드 요구사항을
 | Docker | 서비스별 실행 환경 구성 |
 | Docker Compose | Python 애플리케이션과 PostgreSQL 실행 관리 |
 | requests | 공공데이터 API 요청 |
-| psycopg2 | PostgreSQL 연결, 트랜잭션 및 Batch Upsert |
+| psycopg2 | PostgreSQL 연결, 트랜잭션 및 Batch Insert |
 | python-dotenv | 로컬 환경변수 로딩 |
 | pytest | 단위 및 PostgreSQL 통합 테스트 |
 
@@ -258,11 +272,20 @@ PostgreSQL 초기화 SQL은 데이터 볼륨을 처음 생성할 때만 자동 �
 
 ### 3. ETL 및 품질 검증 통합 실행
 
-수집 기준일과 페이지당 요청 건수를 전달한다.
+단일 기준일을 실행할 때는 수집 기준일과 페이지당 요청 건수를 전달한다.
 
 ```bash
 docker compose exec app python main.py \
   --base-date "20230601" \
+  --num-of-rows 100
+```
+
+기간을 Backfill할 때는 시작일과 종료일을 함께 전달한다. 시작일과 종료일을 모두 포함하여 날짜별로 순차 실행한다.
+
+```bash
+docker compose exec app python main.py \
+  --base-date "20230601" \
+  --end-date "20230630" \
   --num-of-rows 100
 ```
 
@@ -275,12 +298,16 @@ API 전체 페이지 수집 및 Raw 적재
 → item 추출
 → 컬럼명 및 타입 변환
 → 변환 데이터 품질 검증
-→ Staging Batch Upsert
-→ Staging 적재 품질 검증
-→ Staging Commit
+→ 기존 Mart 기준일 데이터 삭제
+→ 기존 Staging 기준일 데이터 삭제
+→ Staging Batch Insert 및 품질 검증
+→ Mart 생성 및 품질 검증
+→ Staging·Mart Commit
 ```
 
-Raw 단계 실패 시 Raw 트랜잭션을, 이후 단계 실패 시 Staging 트랜잭션을 Rollback한다.
+Raw 단계 실패 시 Raw 트랜잭션을 Rollback한다. 이후 단계가 실패하면 같은 트랜잭션에서 수행한 Mart 삭제, Staging 삭제와 신규 적재를 모두 Rollback하여 이전 스냅샷을 유지한다.
+
+API가 정상 응답했지만 item이 0건인 날짜는 Raw 수집 이력만 보존하고 기존 Staging·Mart 데이터는 삭제하지 않는다. 기간 실행 중 한 날짜가 실패하면 그 날짜는 Rollback하고 실행을 중단하며, 앞선 날짜에서 이미 완료된 결과는 유지한다.
 
 ### 4. 단위 테스트
 
@@ -299,9 +326,9 @@ pytest -q
 이 명령은 다음 작업을 자동으로 수행한다.
 
 - `etl_test_db` 테스트 전용 PostgreSQL 컨테이너 실행
-- `database/init/001~004` DDL 적용
+- `database/init/001~005` DDL 적용
 - 전체 단위 테스트와 PostgreSQL 통합 테스트 실행
-- Staging Upsert 멱등성과 제약조건 실패 시 Rollback 검증
+- 기준일 스냅샷 교체와 제약조건 실패 시 Rollback 검증
 - 테스트 종료 후 컨테이너, 네트워크와 임시 DB 삭제
 
 테스트 DB는 호스트의 `5434` 포트를 사용하며 개발 DB의 데이터와 Volume을 공유하지 않는다.
@@ -326,7 +353,7 @@ Staging 행 수: 2,720
 Raw 출처 페이지 수: 28
 ```
 
-동일한 `run_id`와 기준일로 통합 실행을 반복해도 Staging 행 수는 2,720건으로 유지된다.
+같은 기준일을 재수집하면 Staging과 Mart가 최신 수집 결과로 교체되며, 이전 수집에만 존재했던 종목은 남지 않는다.
 
 ### 7. 로그 확인
 
@@ -367,9 +394,7 @@ docker compose down
 다음 순서로 프로젝트를 확장한다.
 
 1. 환경설정 및 데이터베이스 연결 코드 분리
-2. Mart 요구사항과 스키마 설계
-3. Mart 집계 및 적재 구현
-4. Airflow DAG와 재시도 정책 구성
-5. Metabase 대시보드 구성
-6. 모니터링, 장애 및 Backfill 테스트
-7. 프로젝트 트러블슈팅과 설계 결정 문서화
+2. Airflow DAG와 재시도 정책 구성
+3. Metabase 대시보드 구성
+4. 모니터링과 장애 테스트
+5. 프로젝트 트러블슈팅과 설계 결정 문서화

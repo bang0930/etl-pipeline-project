@@ -22,23 +22,11 @@ INSERT INTO staging.stock_prices (
     market_cap
 )
 VALUES %s
-ON CONFLICT (base_date, isin_code)
-DO UPDATE SET
-    source_response_id = EXCLUDED.source_response_id,
-    short_code = EXCLUDED.short_code,
-    item_name = EXCLUDED.item_name,
-    market_category = EXCLUDED.market_category,
-    close_price = EXCLUDED.close_price,
-    price_change = EXCLUDED.price_change,
-    change_rate = EXCLUDED.change_rate,
-    open_price = EXCLUDED.open_price,
-    high_price = EXCLUDED.high_price,
-    low_price = EXCLUDED.low_price,
-    trading_volume = EXCLUDED.trading_volume,
-    trading_value = EXCLUDED.trading_value,
-    listed_share_count = EXCLUDED.listed_share_count,
-    market_cap = EXCLUDED.market_cap,
-    processed_at = NOW()
+"""
+
+DELETE_STOCK_PRICES_SQL = """
+DELETE FROM staging.stock_prices
+WHERE base_date = %s
 """
 
 STOCK_PRICE_VALUES_TEMPLATE = """
@@ -76,3 +64,10 @@ def load_stock_prices(conn, transformed_items):
         )
 
     return len(transformed_items)
+
+
+def delete_stock_prices_for_date(conn, base_date):
+    """기준일의 기존 Staging 스냅샷을 삭제한다."""
+    with conn.cursor() as cursor:
+        cursor.execute(DELETE_STOCK_PRICES_SQL, (base_date,))
+        return cursor.rowcount

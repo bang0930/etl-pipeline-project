@@ -186,7 +186,7 @@ def parse_optional_decimal(value):
     return Decimal(str(value).strip())
 
 def transform_stock_prices(conn, run_id, base_date):
-    """지정한 Raw 실행 데이터를 Staging 적재 형식으로 변환하고 검증한다."""
+    """지정한 Raw 실행 데이터를 Staging 적재 형식으로 변환한다."""
     raw_responses = fetch_raw_responses(
         conn,
         run_id,
@@ -201,20 +201,17 @@ def transform_stock_prices(conn, run_id, base_date):
 
     raw_items = extract_items(raw_responses)
     transformed_items = transform_stock_price_items(raw_items)
-    validated_items = validate_transformed_data(transformed_items)
 
     expected_item_count = raw_responses[0]["response_total_count"]
-    if len(validated_items) != expected_item_count:
+    if len(transformed_items) != expected_item_count:
         raise ValueError(
             "Item count mismatch: "
             f"expected={expected_item_count}, "
-            f"actual={len(validated_items)}"
+            f"actual={len(transformed_items)}"
         )
 
     print(f"Raw 페이지 수: {len(raw_responses)}")
     print(f"추출 item 수: {len(raw_items)}")
     print(f"변환 item 수: {len(transformed_items)}")
-    print(f"검증 item 수: {len(validated_items)}")
-    print("Transform 검증 완료")
 
-    return validated_items
+    return transformed_items

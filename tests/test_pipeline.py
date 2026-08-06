@@ -60,6 +60,12 @@ def test_main_runs_extract_transform_and_load_in_order(
     def fake_validate_staging(conn, items):
         events.append(("validate_staging", len(items)))
 
+    def fake_delete_mart(conn, base_date):
+        events.append(("delete_mart", base_date))
+
+    def fake_delete_staging(conn, base_date):
+        events.append(("delete_staging", base_date))
+
     def fake_build_mart(conn, base_date):
         events.append(("build_mart", base_date))
         return ["mart-row"]
@@ -79,6 +85,16 @@ def test_main_runs_extract_transform_and_load_in_order(
         fake_validate_transformed,
     )
     monkeypatch.setattr(main_module, "load_stock_prices", fake_load)
+    monkeypatch.setattr(
+        main_module,
+        "delete_daily_stock_rankings_for_date",
+        fake_delete_mart,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "delete_stock_prices_for_date",
+        fake_delete_staging,
+    )
     monkeypatch.setattr(
         main_module,
         "validate_staging_load",
@@ -109,9 +125,10 @@ def test_main_runs_extract_transform_and_load_in_order(
         "commit",
         ("transform", "run-1", date(2023, 6, 1)),
         ("validate_transformed", 1, date(2023, 6, 1)),
+        ("delete_mart", date(2023, 6, 1)),
+        ("delete_staging", date(2023, 6, 1)),
         ("load", 1),
         ("validate_staging", 1),
-        "commit",
         ("build_mart", date(2023, 6, 1)),
         ("validate_mart", 1, 1, date(2023, 6, 1)),
         "commit",
@@ -200,6 +217,89 @@ def test_main_rejects_non_positive_num_of_rows(monkeypatch):
     assert error.value.code == 2
 
 
+def test_main_runs_inclusive_date_range(monkeypatch):
+    events = []
+    conn = FakeConnection(events)
+    monkeypatch.setattr(
+        main_module,
+        "create_database_connection",
+        lambda: conn,
+    )
+
+    def fake_run_pipeline_for_date(conn, base_date, num_of_rows):
+        events.append(("run_date", base_date, num_of_rows))
+
+    monkeypatch.setattr(
+        main_module,
+        "run_pipeline_for_date",
+        fake_run_pipeline_for_date,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--base-date",
+            "20230601",
+            "--end-date",
+            "20230603",
+            "--num-of-rows",
+            "50",
+        ],
+    )
+
+    main_module.main()
+
+    assert events == [
+        ("run_date", date(2023, 6, 1), 50),
+        ("run_date", date(2023, 6, 2), 50),
+        ("run_date", date(2023, 6, 3), 50),
+        "close",
+    ]
+
+
+def test_main_rejects_end_date_before_base_date(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "create_database_connection",
+        lambda: pytest.fail("유효하지 않은 날짜 범위에서는 DB에 연결하면 안 됩니다."),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--base-date",
+            "20230603",
+            "--end-date",
+            "20230601",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        main_module.main()
+
+    assert error.value.code == 2
+
+
+def test_main_rejects_invalid_base_date_format(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "create_database_connection",
+        lambda: pytest.fail("유효하지 않은 날짜는 DB에 연결하면 안 됩니다."),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["main.py", "--base-date", "2023-06-01"],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        main_module.main()
+
+    assert error.value.code == 2
+
+
 def test_main_rolls_back_raw_when_raw_quality_validation_fails(monkeypatch):
     events = []
     conn = FakeConnection(events)
@@ -279,6 +379,16 @@ def test_main_rolls_back_staging_when_load_quality_validation_fails(
         "load_stock_prices",
         lambda conn, items: len(items),
     )
+    monkeypatch.setattr(
+        main_module,
+        "delete_daily_stock_rankings_for_date",
+        lambda conn, base_date: events.append("delete_mart"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "delete_stock_prices_for_date",
+        lambda conn, base_date: events.append("delete_staging"),
+    )
 
     def failing_staging_validation(conn, items):
         events.append("validate_staging")
@@ -296,13 +406,15 @@ def test_main_rolls_back_staging_when_load_quality_validation_fails(
 
     assert events == [
         "commit",
+        "delete_mart",
+        "delete_staging",
         "validate_staging",
         "rollback",
         "close",
     ]
 
 
-def test_main_keeps_staging_commit_and_rolls_back_failed_mart(
+def test_main_rolls_back_staging_and_mart_when_mart_validation_fails(
     monkeypatch,
     transformed_item,
 ):
@@ -344,6 +456,16 @@ def test_main_keeps_staging_commit_and_rolls_back_failed_mart(
     )
     monkeypatch.setattr(
         main_module,
+        "delete_daily_stock_rankings_for_date",
+        lambda conn, base_date: events.append("delete_mart"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "delete_stock_prices_for_date",
+        lambda conn, base_date: events.append("delete_staging"),
+    )
+    monkeypatch.setattr(
+        main_module,
         "validate_staging_load",
         lambda conn, items: None,
     )
@@ -369,8 +491,53 @@ def test_main_keeps_staging_commit_and_rolls_back_failed_mart(
 
     assert events == [
         "commit",
-        "commit",
+        "delete_mart",
+        "delete_staging",
         "validate_mart",
         "rollback",
         "close",
     ]
+
+
+def test_main_preserves_existing_snapshot_when_api_returns_zero_items(monkeypatch):
+    events = []
+    conn = FakeConnection(events)
+    monkeypatch.setattr(
+        main_module,
+        "create_database_connection",
+        lambda: conn,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "extract_stock_prices",
+        lambda conn, base_date, num_of_rows: (
+            "run-empty",
+            date(2023, 6, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "fetch_raw_responses",
+        lambda conn, run_id, base_date: ["empty-raw"],
+    )
+    monkeypatch.setattr(main_module, "validate_raw_batch", lambda rows: None)
+    monkeypatch.setattr(
+        main_module,
+        "transform_stock_prices",
+        lambda conn, run_id, base_date: [],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "delete_daily_stock_rankings_for_date",
+        lambda conn, base_date: events.append("delete_mart"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "delete_stock_prices_for_date",
+        lambda conn, base_date: events.append("delete_staging"),
+    )
+    monkeypatch.setattr(sys, "argv", ["main.py", "--base-date", "20230601"])
+
+    main_module.main()
+
+    assert events == ["commit", "rollback", "close"]

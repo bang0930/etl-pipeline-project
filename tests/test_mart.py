@@ -68,3 +68,19 @@ def test_build_daily_stock_rankings_rejects_count_mismatch(monkeypatch):
 
     with pytest.raises(ValueError, match="Mart row count mismatch"):
         mart_module.build_daily_stock_rankings(object(), "2023-06-01")
+
+
+def test_delete_daily_stock_rankings_for_date_executes_date_delete():
+    cursor = FakeCursor(rowcount=2)
+    conn = FakeConnection(cursor)
+
+    deleted_count = mart_module.delete_daily_stock_rankings_for_date(
+        conn,
+        "2023-06-01",
+    )
+
+    assert deleted_count == 2
+    assert cursor.executed == (
+        mart_module.DELETE_DAILY_STOCK_RANKINGS_SQL,
+        ("2023-06-01",),
+    )
