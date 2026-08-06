@@ -1,17 +1,50 @@
 import os
+from datetime import datetime
+from uuid import uuid4
 
 import requests
-from psycopg2.extras import Json
 from dotenv import load_dotenv
-from uuid import uuid4
-from datetime import datetime
+from psycopg2.extras import Json
 
-load_dotenv()
 
-api_base_url = os.environ["STOCK_API_BASE_URL"]
-service_key = os.environ["STOCK_API_SERVICE_KEY"]
+API_BASE_URL_ENV = "STOCK_API_BASE_URL"
+API_SERVICE_KEY_ENV = "STOCK_API_SERVICE_KEY"
+RESPONSE_BODY_PREVIEW_LENGTH = 200
 
-def fetch_stock_price_page(base_date, page_no, num_of_rows = 100):
+
+def get_stock_api_config():
+    """실행 시점에 주식시세 API 설정을 읽고 누락 여부를 확인한다."""
+    load_dotenv()
+
+    config = {
+        API_BASE_URL_ENV: os.environ.get(API_BASE_URL_ENV),
+        API_SERVICE_KEY_ENV: os.environ.get(API_SERVICE_KEY_ENV),
+    }
+    missing_names = [name for name, value in config.items() if not value]
+
+    if missing_names:
+        raise RuntimeError(
+            "Missing required stock price API environment variables: "
+            + ", ".join(missing_names)
+        )
+
+    return config[API_BASE_URL_ENV], config[API_SERVICE_KEY_ENV]
+
+
+def build_response_body_preview(response):
+    """오류 진단에 사용할 응답 본문을 한 줄, 제한된 길이로 반환한다."""
+    normalized_body = " ".join(response.text.split())
+    body_preview = normalized_body[:RESPONSE_BODY_PREVIEW_LENGTH]
+
+    if len(normalized_body) > RESPONSE_BODY_PREVIEW_LENGTH:
+        body_preview += "..."
+
+    return body_preview
+
+
+def fetch_stock_price_page(base_date, page_no, num_of_rows=100):
+    api_base_url, service_key = get_stock_api_config()
+
     response = requests.get(
         f"{api_base_url.rstrip('/')}/getStockPriceInfo",
         params={
@@ -30,8 +63,18 @@ def fetch_stock_price_page(base_date, page_no, num_of_rows = 100):
         raise RuntimeError(
             f"Stock price API HTTP error: status={response.status_code}"
         ) from None
-    
-    data = response.json()
+
+    try:
+        data = response.json()
+    except requests.exceptions.JSONDecodeError:
+        content_type = response.headers.get("Content-Type", "unknown")
+        body_preview = build_response_body_preview(response)
+        raise RuntimeError(
+            "Stock price API returned a non-JSON response: "
+            f"status={response.status_code}, "
+            f"content_type={content_type}, "
+            f"body={body_preview}"
+        ) from None
 
     return response.status_code, data
 

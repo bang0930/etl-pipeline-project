@@ -1,4 +1,3 @@
-import os
 import sys
 from datetime import date
 from decimal import Decimal
@@ -12,11 +11,6 @@ import pytest
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
-
-# extract 모듈은 import 시 API 설정을 읽으므로 테스트용 기본값을 제공한다.
-os.environ.setdefault("STOCK_API_BASE_URL", "https://example.test/api")
-os.environ.setdefault("STOCK_API_SERVICE_KEY", "test-service-key")
-
 
 @pytest.fixture
 def stock_item():
