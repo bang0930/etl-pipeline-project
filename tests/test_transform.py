@@ -3,6 +3,8 @@ from decimal import Decimal
 
 import pytest
 
+import transform.transform as transform_module
+from quality.exceptions import PaginationConsistencyError
 from transform.transform import (
     extract_items,
     parse_date,
@@ -132,9 +134,42 @@ def test_validate_transformed_data_rejects_missing_required_field(
 
 def test_validate_transformed_data_rejects_duplicate_key(transformed_item):
     duplicate = {**transformed_item, "source_response_id": 2}
+    items = [transformed_item, duplicate]
 
-    with pytest.raises(ValueError, match="Duplicate key found"):
-        validate_transformed_data([transformed_item, duplicate])
+    with pytest.raises(PaginationConsistencyError) as error:
+        validate_transformed_data(items)
+
+    message = str(error.value)
+    assert "Duplicate stock key detected across API pages" in message
+    assert "key=(2023-06-01, KR700088K015)" in message
+    assert "source data may have changed during pagination" in message
+    assert "Retry the same base date" in message
+    assert len(items) == 2
+
+
+def test_transform_stock_prices_classifies_item_count_mismatch(monkeypatch):
+    raw_responses = [
+        {
+            "response_total_count": 2,
+            "payload": {"response": {"body": {"items": {"item": []}}}},
+        }
+    ]
+    monkeypatch.setattr(
+        transform_module,
+        "fetch_raw_responses",
+        lambda conn, run_id, base_date: raw_responses,
+    )
+
+    with pytest.raises(PaginationConsistencyError) as error:
+        transform_module.transform_stock_prices(
+            conn=object(),
+            run_id="run-count-mismatch",
+            base_date=date(2023, 6, 1),
+        )
+
+    message = str(error.value)
+    assert "expected=2, actual=0" in message
+    assert "Retry the same base date" in message
 
 
 def test_validate_transformed_data_rejects_negative_non_negative_field(
