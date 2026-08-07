@@ -41,7 +41,7 @@
 - [x] Mart 설계 및 구현
 - [x] 기간 Backfill 실행 지원
 - [x] Airflow Docker 실행 환경 및 Metadata DB 구성
-- [ ] Airflow DAG 구성
+- [x] 매일 19시 KST 자동 실행 Airflow TaskFlow DAG 구성
 - [ ] Metabase 대시보드 구성
 - [ ] 모니터링, 장애 및 재시도 테스트
 
@@ -98,10 +98,10 @@ flowchart LR
 - Docker Compose는 Python 애플리케이션과 PostgreSQL의 실행 환경을 구성한다.
 - Extract는 외부 API를 페이지 단위로 호출하고 전체 응답을 Raw 계층에 저장한다.
 - 통합 실행 코드는 API 수집부터 Raw·Staging·Mart 적재와 품질 검증까지 수행한다.
-- Airflow는 이후 Extract, Transform, Load의 실행 순서, 스케줄, 재시도와 상태를 관리할 예정이다.
+- Airflow TaskFlow DAG는 Extract, 기준일 스냅샷 게시와 최종 검증을 작업별로 실행하고 상태와 로그를 관리한다.
 - Metabase는 Mart 데이터를 조회하여 최종 결과를 시각화할 예정이다.
 
-현재 `main.py`는 Extract부터 Staging Load와 품질 검증까지 한 번에 실행한다.
+현재 `main.py` CLI와 Airflow DAG는 동일한 Python ETL 함수를 재사용한다. 대량 데이터는 PostgreSQL에 두고 Airflow Task 간에는 `run_id`, 기준일과 처리 건수 등 작은 메타데이터만 전달한다.
 
 ## 데이터 계층
 
@@ -238,6 +238,7 @@ etl-pipeline-project/
 │   ├── airflow.Dockerfile
 │   └── airflow-requirements.txt
 ├── dags/
+│   └── stock_price_etl_dag.py
 ├── config/
 ├── scripts/
 │   └── test-postgres.sh
@@ -291,11 +292,60 @@ docker compose ps
 - `airflow-dag-processor`
 - `airflow-triggerer`
 
-Airflow UI는 [http://localhost:8080](http://localhost:8080)에서 확인한다. 현재 Airflow 실행 환경만 구성되어 있으며 실제 주식시세 DAG는 후속 작업에서 추가한다.
+Airflow UI는 [http://localhost:8080](http://localhost:8080)에서 확인한다. `stock_price_etl` DAG는 매일 한국시간 19시에 자동 실행한다. 외부 API 데이터가 기준일 다음 영업일 오후 1시 이후 공개되므로, 실행일 전날부터 역순으로 조회하여 API가 보유한 가장 최근 거래일을 선택한다.
+
+새 DAG는 최초 등록 시 일시정지 상태이므로 UI에서 활성화하거나 다음 명령을 한 번 실행한다.
+
+```bash
+docker compose exec airflow-api-server \
+  airflow dags unpause stock_price_etl --yes
+```
 
 PostgreSQL 초기화 SQL은 데이터 볼륨을 처음 생성할 때만 자동 실행된다. 기존 볼륨에 새 변경 SQL을 추가한 경우 해당 SQL을 별도로 적용해야 한다.
 
-### 4. ETL 및 품질 검증 통합 실행
+### 4. Airflow DAG 자동·수동 실행
+
+자동 실행 정책은 다음과 같다.
+
+```text
+매일 19:00 Asia/Seoul 실행
+→ 실행일 전날부터 최대 14일 역순 조회
+→ 처음으로 0건이 아닌 API 기준일 선택
+→ 선택한 기준일의 Staging·Mart 스냅샷 게시
+```
+
+주말과 공휴일은 별도 달력으로 추정하지 않고 API 응답을 기준으로 건너뛴다. 탐색 중 0건인 날짜의 Raw 수집 이력은 보존되지만 기존 Staging·Mart 스냅샷은 변경하지 않는다.
+
+특정 날짜를 다시 실행할 때는 Airflow UI에서 `stock_price_etl` DAG를 선택하고 Trigger 화면에 다음 값을 입력한다.
+
+```text
+base_date: 20230601
+num_of_rows: 100
+```
+
+CLI에서 수동 실행할 수도 있다.
+
+```bash
+docker compose exec airflow-api-server \
+  airflow dags trigger stock_price_etl \
+  --conf '{"base_date":"20230601","num_of_rows":100}'
+```
+
+DAG는 다음 세 Task로 구성된다.
+
+```text
+extract_and_validate_raw
+→ transform_and_publish_snapshot
+→ verify_published_snapshot
+```
+
+- 첫 Task는 API 전체 페이지를 Raw에 저장하고 품질 검증 후 Raw 트랜잭션을 Commit한다.
+- 두 번째 Task는 Raw를 다시 조회하여 변환하고, Mart 삭제 → Staging 삭제 → Staging 적재 → Mart 생성 순서를 하나의 트랜잭션으로 처리한다.
+- 마지막 Task는 Commit된 Staging과 Mart의 행 수와 종목 키 집합을 PostgreSQL에서 다시 조회한다.
+- API 결과가 0건이면 기존 Staging·Mart를 보존하고 이후 검증도 건너뛴 상태로 정상 종료한다.
+- TaskFlow의 XCom에는 `run_id`, 기준일, 상태와 처리 건수만 전달하며 API payload와 변환 행 전체는 전달하지 않는다.
+
+### 5. ETL 및 품질 검증 CLI 통합 실행
 
 단일 기준일을 실행할 때는 수집 기준일과 페이지당 요청 건수를 전달한다.
 
@@ -328,13 +378,14 @@ API 전체 페이지 수집 및 Raw 적재
 → Staging Batch Insert 및 품질 검증
 → Mart 생성 및 품질 검증
 → Staging·Mart Commit
+→ Commit된 Staging·Mart 최종 재조회 검증
 ```
 
 Raw 단계 실패 시 Raw 트랜잭션을 Rollback한다. 이후 단계가 실패하면 같은 트랜잭션에서 수행한 Mart 삭제, Staging 삭제와 신규 적재를 모두 Rollback하여 이전 스냅샷을 유지한다.
 
 API가 정상 응답했지만 item이 0건인 날짜는 Raw 수집 이력만 보존하고 기존 Staging·Mart 데이터는 삭제하지 않는다. 기간 실행 중 한 날짜가 실패하면 그 날짜는 Rollback하고 실행을 중단하며, 앞선 날짜에서 이미 완료된 결과는 유지한다.
 
-### 5. 단위 테스트
+### 6. 단위 테스트
 
 ```bash
 pytest -q
@@ -342,7 +393,7 @@ pytest -q
 
 로컬 단위 테스트에서는 실제 PostgreSQL 통합 테스트를 자동으로 건너뛴다.
 
-### 6. PostgreSQL 통합 테스트
+### 7. PostgreSQL 통합 테스트
 
 ```bash
 ./scripts/test-postgres.sh
@@ -358,7 +409,7 @@ pytest -q
 
 테스트 DB는 호스트의 `5434` 포트를 사용하며 개발 DB의 데이터와 Volume을 공유하지 않는다.
 
-### 7. 적재 결과 확인
+### 8. 적재 결과 확인
 
 ```sql
 SELECT
@@ -380,7 +431,7 @@ Raw 출처 페이지 수: 28
 
 같은 기준일을 재수집하면 Staging과 Mart가 최신 수집 결과로 교체되며, 이전 수집에만 존재했던 종목은 남지 않는다.
 
-### 8. 로그 확인
+### 9. 로그 확인
 
 ```bash
 docker compose logs -f
@@ -396,7 +447,7 @@ docker compose logs -f \
   airflow-triggerer
 ```
 
-### 9. 컨테이너 종료
+### 10. 컨테이너 종료
 
 ```bash
 docker compose down
@@ -429,7 +480,7 @@ docker compose down
 ## 현재 제약사항
 
 - 외부 API 호출 재시도 정책이 아직 없다.
-- Airflow 실행 환경은 구성됐지만 ETL DAG와 스케줄 정책은 아직 없다.
+- Airflow DAG는 매일 19시 KST에 실행되지만 재시도와 catchup 정책은 아직 없다.
 - DB 초기화 SQL과 기존 DB 변경을 위한 마이그레이션이 분리되어 있지 않다.
 - 실행 로그가 표준 출력으로만 제공된다.
 
@@ -438,7 +489,7 @@ docker compose down
 다음 순서로 프로젝트를 확장한다.
 
 1. 환경설정 및 데이터베이스 연결 코드 분리
-2. Airflow DAG와 재시도 정책 구성
+2. Airflow 재시도 및 catchup 정책 구성
 3. Metabase 대시보드 구성
 4. 모니터링과 장애 테스트
 5. 프로젝트 트러블슈팅과 설계 결정 문서화

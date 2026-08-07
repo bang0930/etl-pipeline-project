@@ -16,7 +16,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_JWT_SECRET:-airflow-local-jwt-secret}
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
     AIRFLOW_CONFIG: /opt/airflow/config/airflow.cfg
-    PYTHONPATH: /opt/airflow
+    # DAG에서는 app/main.py의 ETL 함수를 직접 import한다.
+    PYTHONPATH: /opt/airflow:/opt/airflow/app
   volumes:
     - ./app:/opt/airflow/app:ro
     - ./dags:/opt/airflow/dags

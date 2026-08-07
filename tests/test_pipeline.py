@@ -47,7 +47,7 @@ def test_main_runs_extract_transform_and_load_in_order(
 
     def fake_fetch_raw(conn, run_id, base_date):
         events.append(("fetch_raw", run_id, base_date))
-        return ["raw-response"]
+        return [{"response_total_count": 1}]
 
     def fake_validate_raw(raw_responses):
         events.append(("validate_raw", len(raw_responses)))
@@ -74,6 +74,14 @@ def test_main_runs_extract_transform_and_load_in_order(
         events.append(
             ("validate_mart", len(rows), len(items), expected_base_date)
         )
+
+    def fake_validate_published(conn, base_date, expected_row_count):
+        events.append(("verify_published", base_date, expected_row_count))
+        return {
+            "staging_row_count": 1,
+            "mart_row_count": 1,
+            "key_mismatch_count": 0,
+        }
 
     monkeypatch.setattr(main_module, "extract_stock_prices", fake_extract)
     monkeypatch.setattr(main_module, "fetch_raw_responses", fake_fetch_raw)
@@ -111,6 +119,11 @@ def test_main_runs_extract_transform_and_load_in_order(
         fake_validate_mart,
     )
     monkeypatch.setattr(
+        main_module,
+        "validate_published_snapshot",
+        fake_validate_published,
+    )
+    monkeypatch.setattr(
         sys,
         "argv",
         ["main.py", "--base-date", "20230601", "--num-of-rows", "100"],
@@ -132,6 +145,8 @@ def test_main_runs_extract_transform_and_load_in_order(
         ("build_mart", date(2023, 6, 1)),
         ("validate_mart", 1, 1, date(2023, 6, 1)),
         "commit",
+        ("verify_published", date(2023, 6, 1), 1),
+        "rollback",
         "close",
     ]
 
@@ -175,7 +190,7 @@ def test_main_keeps_raw_commit_and_rolls_back_staging_on_transform_failure(
 
     def fake_fetch_raw(conn, run_id, base_date):
         events.append("fetch_raw")
-        return ["raw-response"]
+        return [{"response_total_count": 1}]
 
     def fake_validate_raw(raw_responses):
         events.append("validate_raw")
@@ -300,6 +315,36 @@ def test_main_rejects_invalid_base_date_format(monkeypatch):
     assert error.value.code == 2
 
 
+def test_extract_latest_available_raw_skips_empty_dates(monkeypatch):
+    requested_dates = []
+
+    def fake_extract(conn, base_date, num_of_rows):
+        requested_dates.append(base_date)
+        item_count = 10 if base_date == date(2023, 6, 2) else 0
+        return {
+            "run_id": f"run-{base_date}",
+            "base_date": base_date.isoformat(),
+            "raw_page_count": 1,
+            "raw_item_count": item_count,
+        }
+
+    monkeypatch.setattr(main_module, "extract_raw_for_date", fake_extract)
+
+    result = main_module.extract_latest_available_raw(
+        conn=object(),
+        reference_date=date(2023, 6, 5),
+        num_of_rows=100,
+    )
+
+    assert requested_dates == [
+        date(2023, 6, 4),
+        date(2023, 6, 3),
+        date(2023, 6, 2),
+    ]
+    assert result["base_date"] == "2023-06-02"
+    assert result["raw_item_count"] == 10
+
+
 def test_main_rolls_back_raw_when_raw_quality_validation_fails(monkeypatch):
     events = []
     conn = FakeConnection(events)
@@ -361,7 +406,7 @@ def test_main_rolls_back_staging_when_load_quality_validation_fails(
     monkeypatch.setattr(
         main_module,
         "fetch_raw_responses",
-        lambda conn, run_id, base_date: ["raw"],
+        lambda conn, run_id, base_date: [{"response_total_count": 1}],
     )
     monkeypatch.setattr(main_module, "validate_raw_batch", lambda rows: None)
     monkeypatch.setattr(
@@ -436,7 +481,7 @@ def test_main_rolls_back_staging_and_mart_when_mart_validation_fails(
     monkeypatch.setattr(
         main_module,
         "fetch_raw_responses",
-        lambda conn, run_id, base_date: ["raw"],
+        lambda conn, run_id, base_date: [{"response_total_count": 1}],
     )
     monkeypatch.setattr(main_module, "validate_raw_batch", lambda rows: None)
     monkeypatch.setattr(
@@ -518,7 +563,7 @@ def test_main_preserves_existing_snapshot_when_api_returns_zero_items(monkeypatc
     monkeypatch.setattr(
         main_module,
         "fetch_raw_responses",
-        lambda conn, run_id, base_date: ["empty-raw"],
+        lambda conn, run_id, base_date: [{"response_total_count": 0}],
     )
     monkeypatch.setattr(main_module, "validate_raw_batch", lambda rows: None)
     monkeypatch.setattr(
