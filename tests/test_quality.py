@@ -5,6 +5,7 @@ import pytest
 
 from quality.exceptions import DataQualityError, PaginationConsistencyError
 from quality.validators import (
+    validate_published_snapshot,
     validate_raw_batch,
     validate_mart_rankings,
     validate_staging_load,
@@ -242,6 +243,72 @@ def test_validate_staging_load_rejects_row_count_mismatch(transformed_item):
 
     with pytest.raises(DataQualityError, match="적재 건수"):
         validate_staging_load(conn, [transformed_item])
+
+
+def test_validate_published_snapshot_accepts_matching_counts_and_keys():
+    conn = FakeConnection(
+        {
+            "staging_row_count": 2,
+            "mart_row_count": 2,
+            "key_mismatch_count": 0,
+        }
+    )
+
+    result = validate_published_snapshot(
+        conn,
+        date(2023, 6, 1),
+        expected_row_count=2,
+    )
+
+    assert result == {
+        "staging_row_count": 2,
+        "mart_row_count": 2,
+        "key_mismatch_count": 0,
+    }
+    assert conn.cursor_instance.executed[1] == (
+        date(2023, 6, 1),
+        date(2023, 6, 1),
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (
+            {
+                "staging_row_count": 1,
+                "mart_row_count": 2,
+                "key_mismatch_count": 1,
+            },
+            "Staging 건수",
+        ),
+        (
+            {
+                "staging_row_count": 2,
+                "mart_row_count": 1,
+                "key_mismatch_count": 1,
+            },
+            "Mart 건수",
+        ),
+        (
+            {
+                "staging_row_count": 2,
+                "mart_row_count": 2,
+                "key_mismatch_count": 1,
+            },
+            "종목 키",
+        ),
+    ],
+)
+def test_validate_published_snapshot_rejects_invalid_snapshot(result, message):
+    conn = FakeConnection(result)
+
+    with pytest.raises(DataQualityError, match=message):
+        validate_published_snapshot(
+            conn,
+            date(2023, 6, 1),
+            expected_row_count=2,
+        )
 
 
 def make_mart_rows(transformed_item):

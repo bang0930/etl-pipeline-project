@@ -21,6 +21,29 @@ FROM staging.stock_prices
 WHERE base_date = %s
 """
 
+FETCH_PUBLISHED_SNAPSHOT_QUALITY_SQL = """
+WITH staging_keys AS (
+    SELECT base_date, isin_code
+    FROM staging.stock_prices
+    WHERE base_date = %s
+),
+mart_keys AS (
+    SELECT base_date, isin_code
+    FROM mart.daily_stock_rankings
+    WHERE base_date = %s
+)
+SELECT
+    (SELECT COUNT(*) FROM staging_keys) AS staging_row_count,
+    (SELECT COUNT(*) FROM mart_keys) AS mart_row_count,
+    (
+        SELECT COUNT(*)
+        FROM staging_keys
+        FULL OUTER JOIN mart_keys USING (base_date, isin_code)
+        WHERE staging_keys.isin_code IS NULL
+           OR mart_keys.isin_code IS NULL
+    ) AS key_mismatch_count
+"""
+
 
 def _payload_items(payload):
     """API payload의 item을 항상 list 형태로 반환한다."""
@@ -234,6 +257,51 @@ def validate_staging_load(conn, transformed_items):
         )
 
     return result
+
+
+def validate_published_snapshot(conn, base_date, expected_row_count):
+    """Commit된 Staging과 Mart를 다시 조회해 게시 결과를 검증한다.
+
+    Airflow의 마지막 검증 Task는 변환 데이터 전체를 XCom으로 받지 않는다.
+    대신 앞 Task가 전달한 예상 건수와 PostgreSQL의 실제 행·키 집합을 비교한다.
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute(
+            FETCH_PUBLISHED_SNAPSHOT_QUALITY_SQL,
+            (base_date, base_date),
+        )
+        result = cursor.fetchone()
+
+    if result is None:
+        raise DataQualityError(
+            f"게시 스냅샷 조회 결과가 없습니다: base_date={base_date}"
+        )
+
+    staging_row_count = result["staging_row_count"]
+    mart_row_count = result["mart_row_count"]
+    key_mismatch_count = result["key_mismatch_count"]
+
+    if staging_row_count != expected_row_count:
+        raise DataQualityError(
+            "게시된 Staging 건수가 일치하지 않습니다: "
+            f"expected={expected_row_count}, actual={staging_row_count}"
+        )
+    if mart_row_count != expected_row_count:
+        raise DataQualityError(
+            "게시된 Mart 건수가 일치하지 않습니다: "
+            f"expected={expected_row_count}, actual={mart_row_count}"
+        )
+    if key_mismatch_count != 0:
+        raise DataQualityError(
+            "게시된 Staging과 Mart의 종목 키가 일치하지 않습니다: "
+            f"mismatch={key_mismatch_count}"
+        )
+
+    return {
+        "staging_row_count": staging_row_count,
+        "mart_row_count": mart_row_count,
+        "key_mismatch_count": key_mismatch_count,
+    }
 
 
 def _dense_rank_map(values):
