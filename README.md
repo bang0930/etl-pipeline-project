@@ -316,6 +316,20 @@ PostgreSQL 초기화 SQL은 데이터 볼륨을 처음 생성할 때만 자동 �
 
 주말과 공휴일은 별도 달력으로 추정하지 않고 API 응답을 기준으로 건너뛴다. 탐색 중 0건인 날짜의 Raw 수집 이력은 보존되지만 기존 Staging·Mart 스냅샷은 변경하지 않는다.
 
+모든 Task는 최초 실행 실패 후 최대 2회 재시도한다. 최초 재시도 간격은 10분이며 지수 백오프를 적용하고, 재시도 간격은 최대 30분으로 제한한다.
+
+모든 재시도가 끝난 뒤 DAG가 최종 실패하면 `slack_default` Airflow Connection을 사용해 Slack으로 DAG ID, Run ID, 실패 Task, 시도 횟수, 오류와 Task 로그 링크를 전송한다. 재시도 중에는 알림을 보내지 않으므로 일시적인 API·네트워크 오류로 같은 알림이 반복되지 않는다.
+
+Slack 알림을 사용하려면 먼저 Slack 채널에 Incoming Webhook을 생성한 뒤, Airflow UI의 **Admin → Connections**에서 다음 Connection을 등록한다.
+
+| 항목 | 값 |
+| --- | --- |
+| Connection Id | `slack_default` |
+| Connection Type | `Slack Incoming Webhook` |
+| Password | Slack에서 발급한 전체 Webhook URL |
+
+Webhook URL은 비밀값이므로 코드, `.env.example`, Git 저장소에 기록하지 않는다. Connection은 Airflow Metadata DB에 저장되고 `AIRFLOW_FERNET_KEY`로 암호화된다. 설정 후 테스트용 DAG 실패를 발생시키기 전에는 Webhook URL이 포함되지 않는 DAG 로딩 및 콜백 구성 테스트만 수행한다.
+
 특정 날짜를 다시 실행할 때는 Airflow UI에서 `stock_price_etl` DAG를 선택하고 Trigger 화면에 다음 값을 입력한다.
 
 ```text
@@ -330,6 +344,21 @@ docker compose exec airflow-api-server \
   airflow dags trigger stock_price_etl \
   --conf '{"base_date":"20230601","num_of_rows":100}'
 ```
+
+과거 날짜 범위는 `catchup`을 켜서 자동 생성하지 않고 Airflow Backfill을 명시적으로 실행한다. 먼저 dry-run으로 생성될 Run을 확인한다.
+
+```bash
+docker compose exec airflow-api-server \
+  airflow backfill create \
+  --dag-id stock_price_etl \
+  --from-date 2023-06-01T19:00:00+09:00 \
+  --to-date 2023-06-03T19:00:00+09:00 \
+  --reprocess-behavior failed \
+  --max-active-runs 1 \
+  --dry-run
+```
+
+dry-run 결과를 확인한 후 `--dry-run`을 제거하면 실제 Backfill을 시작한다. 각 Backfill Run은 자신의 논리적 실행일을 기준으로 최신 공개 거래일을 탐색한다.
 
 DAG는 다음 세 Task로 구성된다.
 
@@ -480,16 +509,16 @@ docker compose down
 ## 현재 제약사항
 
 - 외부 API 호출 재시도 정책이 아직 없다.
-- Airflow DAG는 매일 19시 KST에 실행되지만 재시도와 catchup 정책은 아직 없다.
+- Airflow DAG는 과거 누락 구간을 자동 생성하지 않으며, 기간 재처리는 명시적 Backfill 명령으로 실행한다.
 - DB 초기화 SQL과 기존 DB 변경을 위한 마이그레이션이 분리되어 있지 않다.
 - 실행 로그가 표준 출력으로만 제공된다.
+- Slack Connection을 등록하지 않은 환경에서는 실패 알림을 전송할 수 없다.
 
 ## 향후 계획
 
 다음 순서로 프로젝트를 확장한다.
 
 1. 환경설정 및 데이터베이스 연결 코드 분리
-2. Airflow 재시도 및 catchup 정책 구성
-3. Metabase 대시보드 구성
-4. 모니터링과 장애 테스트
-5. 프로젝트 트러블슈팅과 설계 결정 문서화
+2. Metabase 대시보드 구성
+3. 모니터링과 장애 테스트
+4. 프로젝트 트러블슈팅과 설계 결정 문서화

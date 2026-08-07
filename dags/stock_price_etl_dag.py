@@ -1,8 +1,11 @@
-"""금융위원회 주식시세 ETL을 수동 실행하는 Airflow TaskFlow DAG."""
+"""금융위원회 주식시세 ETL을 자동·수동 실행하는 Airflow TaskFlow DAG."""
 
+from datetime import timedelta
+
+import pendulum
+from airflow.providers.slack.notifications.slack_webhook import SlackWebhookNotifier
 from airflow.sdk import Param, dag, get_current_context, task
 from airflow.timetables.trigger import CronTriggerTimetable
-import pendulum
 
 from main import (
     create_database_connection,
@@ -11,6 +14,22 @@ from main import (
     parse_cli_date,
     publish_snapshot_for_run,
     verify_published_snapshot,
+)
+
+
+# 실제 Webhook URL은 코드에 두지 않고 Airflow의 slack_default Connection에서 읽는다.
+# DAG의 모든 재시도가 끝난 뒤 최종 실패 상태가 되었을 때만 이 콜백이 실행된다.
+SLACK_FAILURE_NOTIFIER = SlackWebhookNotifier(
+    slack_webhook_conn_id="slack_default",
+    text=(
+        ":red_circle: *Stock Price ETL 실패*\n"
+        "*DAG*: `{{ dag.dag_id }}`\n"
+        "*Run*: `{{ run_id }}`\n"
+        "*Task*: `{{ task_instance.task_id }}`\n"
+        "*시도 횟수*: `{{ task_instance.try_number }}`\n"
+        "*오류*: `{{ exception }}`\n"
+        "<{{ task_instance.log_url }}|Airflow Task 로그 열기>"
+    ),
 )
 
 
@@ -24,6 +43,14 @@ from main import (
     start_date=pendulum.datetime(2023, 1, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
+    on_failure_callback=SLACK_FAILURE_NOTIFIER,
+    default_args={
+        # 최초 실행을 제외하고 최대 2회 다시 시도한다.
+        "retries": 2,
+        "retry_delay": timedelta(minutes=10),
+        "retry_exponential_backoff": True,
+        "max_retry_delay": timedelta(minutes=30),
+    },
     tags=["stock-price", "etl"],
     params={
         "base_date": Param(
