@@ -17,5 +17,8 @@ venv/
 
 # Logs and generated data
 *.log
+logs/
+config/*
+!config/.gitkeep
 data/raw/
 data/processed/

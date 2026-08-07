@@ -40,6 +40,7 @@
 - [x] PostgreSQL 통합 테스트 및 테스트 DB 자동화
 - [x] Mart 설계 및 구현
 - [x] 기간 Backfill 실행 지원
+- [x] Airflow Docker 실행 환경 및 Metadata DB 구성
 - [ ] Airflow DAG 구성
 - [ ] Metabase 대시보드 구성
 - [ ] 모니터링, 장애 및 재시도 테스트
@@ -194,6 +195,7 @@ base_date × isin_code
 | psycopg2 | PostgreSQL 연결, 트랜잭션 및 Batch Insert |
 | python-dotenv | 로컬 환경변수 로딩 |
 | pytest | 단위 및 PostgreSQL 통합 테스트 |
+| Apache Airflow 3.3.0 | LocalExecutor 기반 스케줄링 실행 환경 |
 
 ### 의존성에 포함됐지만 아직 사용하지 않음
 
@@ -206,7 +208,6 @@ base_date × isin_code
 
 | 기술 | 역할 |
 | --- | --- |
-| Apache Airflow | 작업 스케줄링, 의존성, 재시도 및 실행 상태 관리 |
 | Metabase | Mart 데이터 조회 및 대시보드 구성 |
 
 ## 프로젝트 구조
@@ -233,7 +234,11 @@ etl-pipeline-project/
 │       ├── 003_create_staging_tables.sql
 │       └── 004_alter_stock_price_short_code_constraint.sql
 ├── docker/
-│   └── Dockerfile
+│   ├── Dockerfile
+│   ├── airflow.Dockerfile
+│   └── airflow-requirements.txt
+├── dags/
+├── config/
 ├── scripts/
 │   └── test-postgres.sh
 ├── tests/
@@ -259,18 +264,38 @@ etl-pipeline-project/
 cp .env.example .env
 ```
 
-### 2. 컨테이너 실행
+### 2. Airflow 초기화
+
+최초 실행 시 Airflow Metadata DB migration과 관리자 계정 생성을 수행한다.
+
+```bash
+docker compose build airflow-init
+docker compose up airflow-init
+```
+
+`airflow-init exited with code 0`이 출력되면 초기화가 완료된 것이다. 관리자 계정은 `.env`의 `AIRFLOW_ADMIN_USERNAME`과 `AIRFLOW_ADMIN_PASSWORD`로 설정한다. 두 값을 지정하지 않은 로컬 개발 환경의 기본값은 각각 `airflow`이다.
+
+### 3. 컨테이너 실행
 
 ```bash
 docker compose up -d
 docker compose ps
 ```
 
-`etl-app`과 `etl-postgres`가 모두 실행 중인지 확인한다.
+다음 장기 실행 서비스가 모두 `healthy` 또는 `Up` 상태인지 확인한다.
+
+- `etl-app`, `etl-postgres`
+- `airflow-postgres`
+- `airflow-api-server`
+- `airflow-scheduler`
+- `airflow-dag-processor`
+- `airflow-triggerer`
+
+Airflow UI는 [http://localhost:8080](http://localhost:8080)에서 확인한다. 현재 Airflow 실행 환경만 구성되어 있으며 실제 주식시세 DAG는 후속 작업에서 추가한다.
 
 PostgreSQL 초기화 SQL은 데이터 볼륨을 처음 생성할 때만 자동 실행된다. 기존 볼륨에 새 변경 SQL을 추가한 경우 해당 SQL을 별도로 적용해야 한다.
 
-### 3. ETL 및 품질 검증 통합 실행
+### 4. ETL 및 품질 검증 통합 실행
 
 단일 기준일을 실행할 때는 수집 기준일과 페이지당 요청 건수를 전달한다.
 
@@ -309,7 +334,7 @@ Raw 단계 실패 시 Raw 트랜잭션을 Rollback한다. 이후 단계가 실�
 
 API가 정상 응답했지만 item이 0건인 날짜는 Raw 수집 이력만 보존하고 기존 Staging·Mart 데이터는 삭제하지 않는다. 기간 실행 중 한 날짜가 실패하면 그 날짜는 Rollback하고 실행을 중단하며, 앞선 날짜에서 이미 완료된 결과는 유지한다.
 
-### 4. 단위 테스트
+### 5. 단위 테스트
 
 ```bash
 pytest -q
@@ -317,7 +342,7 @@ pytest -q
 
 로컬 단위 테스트에서는 실제 PostgreSQL 통합 테스트를 자동으로 건너뛴다.
 
-### 5. PostgreSQL 통합 테스트
+### 6. PostgreSQL 통합 테스트
 
 ```bash
 ./scripts/test-postgres.sh
@@ -333,7 +358,7 @@ pytest -q
 
 테스트 DB는 호스트의 `5434` 포트를 사용하며 개발 DB의 데이터와 Volume을 공유하지 않는다.
 
-### 6. 적재 결과 확인
+### 7. 적재 결과 확인
 
 ```sql
 SELECT
@@ -355,19 +380,29 @@ Raw 출처 페이지 수: 28
 
 같은 기준일을 재수집하면 Staging과 Mart가 최신 수집 결과로 교체되며, 이전 수집에만 존재했던 종목은 남지 않는다.
 
-### 7. 로그 확인
+### 8. 로그 확인
 
 ```bash
 docker compose logs -f
 ```
 
-### 8. 컨테이너 종료
+Airflow 서비스만 확인할 때는 다음처럼 서비스 이름을 지정할 수 있다.
+
+```bash
+docker compose logs -f \
+  airflow-api-server \
+  airflow-scheduler \
+  airflow-dag-processor \
+  airflow-triggerer
+```
+
+### 9. 컨테이너 종료
 
 ```bash
 docker compose down
 ```
 
-`docker compose down`만 실행하면 PostgreSQL 데이터가 저장된 Docker Volume은 유지된다. 데이터를 함께 삭제하려면 별도의 Volume 삭제가 필요하므로 주의한다.
+`docker compose down`만 실행하면 ETL PostgreSQL과 Airflow Metadata DB의 Docker Volume은 유지된다. `docker compose down --volumes`를 실행하면 두 데이터베이스의 데이터가 모두 삭제되므로 주의한다.
 
 ## 환경변수
 
@@ -380,12 +415,21 @@ docker compose down
 | `POSTGRES_PASSWORD` | PostgreSQL 비밀번호 |
 | `STOCK_API_BASE_URL` | 주식시세정보 API 기본 URL |
 | `STOCK_API_SERVICE_KEY` | 공공데이터포털에서 발급받은 인증키 |
+| `AIRFLOW_UID` | Airflow 컨테이너 실행 사용자 ID. 기본값 `50000` |
+| `AIRFLOW_POSTGRES_DB` | Airflow Metadata DB 이름 |
+| `AIRFLOW_POSTGRES_USER` | Airflow Metadata DB 사용자 |
+| `AIRFLOW_POSTGRES_PASSWORD` | Airflow Metadata DB 비밀번호 |
+| `AIRFLOW_ADMIN_USERNAME` | Airflow UI 관리자 계정명 |
+| `AIRFLOW_ADMIN_PASSWORD` | Airflow UI 관리자 비밀번호 |
+| `AIRFLOW_FERNET_KEY` | Airflow Connection 등 암호화에 사용하는 키 |
+| `AIRFLOW_API_JWT_SECRET` | Airflow 내부 Execution API JWT 서명 키 |
 
 실제 `.env` 파일은 Git으로 추적하지 않는다. 저장소에는 변수명만 제공하는 `.env.example`만 포함한다.
 
 ## 현재 제약사항
 
 - 외부 API 호출 재시도 정책이 아직 없다.
+- Airflow 실행 환경은 구성됐지만 ETL DAG와 스케줄 정책은 아직 없다.
 - DB 초기화 SQL과 기존 DB 변경을 위한 마이그레이션이 분리되어 있지 않다.
 - 실행 로그가 표준 출력으로만 제공된다.
 
