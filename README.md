@@ -42,7 +42,7 @@
 - [x] 기간 Backfill 실행 지원
 - [x] Airflow Docker 실행 환경 및 Metadata DB 구성
 - [x] 매일 19시 KST 자동 실행 Airflow TaskFlow DAG 구성
-- [ ] Metabase 대시보드 구성
+- [x] Metabase 대시보드 구성
 - [ ] 모니터링, 장애 및 재시도 테스트
 
 ## 데이터 소스
@@ -196,6 +196,7 @@ base_date × isin_code
 | python-dotenv | 로컬 환경변수 로딩 |
 | pytest | 단위 및 PostgreSQL 통합 테스트 |
 | Apache Airflow 3.3.0 | LocalExecutor 기반 스케줄링 실행 환경 |
+| Metabase 0.61.2.x | Mart 데이터 조회 및 대시보드 구성 |
 
 ### 의존성에 포함됐지만 아직 사용하지 않음
 
@@ -203,12 +204,6 @@ base_date × isin_code
 | --- | --- |
 | pandas | 필요 시 데이터 정제 및 분석 처리 보조 |
 | SQLAlchemy | 필요 시 데이터베이스 접근 계층 보조 |
-
-### 도입 예정
-
-| 기술 | 역할 |
-| --- | --- |
-| Metabase | Mart 데이터 조회 및 대시보드 구성 |
 
 ## 프로젝트 구조
 
@@ -347,9 +342,9 @@ docker compose logs -f metabase metabase-postgres
 
 주말과 공휴일은 별도 달력으로 추정하지 않고 API 응답을 기준으로 건너뛴다. 탐색 중 0건인 날짜의 Raw 수집 이력은 보존되지만 기존 Staging·Mart 스냅샷은 변경하지 않는다.
 
-모든 Task는 최초 실행 실패 후 최대 2회 재시도한다. 최초 재시도 간격은 10분이며 지수 백오프를 적용하고, 재시도 간격은 최대 30분으로 제한한다.
+모든 Task는 최초 실행 실패 후 최대 2회 재시도한다. 재시도 간격은 2분으로 고정하며, 계속 실패하면 최초 실패 후 약 4분 뒤 최종 실패로 전환한다.
 
-모든 재시도가 끝난 뒤 DAG가 최종 실패하면 `slack_default` Airflow Connection을 사용해 Slack으로 DAG ID, Run ID, 실패 Task, 시도 횟수, 오류와 Task 로그 링크를 전송한다. 재시도 중에는 알림을 보내지 않으므로 일시적인 API·네트워크 오류로 같은 알림이 반복되지 않는다.
+모든 재시도가 끝난 뒤 DAG가 최종 실패하면 `slack_default` Airflow Connection을 사용해 Slack으로 DAG ID, Run ID, 실패 Task, 시도 횟수, 실패 상태와 Task 로그 링크를 전송한다. 상세 오류는 Task 로그에서 확인한다. 재시도 중에는 알림을 보내지 않으므로 일시적인 API·네트워크 오류로 같은 알림이 반복되지 않는다.
 
 Slack 알림을 사용하려면 먼저 Slack 채널에 Incoming Webhook을 생성한 뒤, Airflow UI의 **Admin → Connections**에서 다음 Connection을 등록한다.
 
@@ -527,6 +522,9 @@ docker compose logs -f \
   airflow-triggerer
 ```
 
+장애 재현 명령, 기대 동작과 복구 절차는
+[장애 테스트 및 복구 가이드](docs/operations/failure-recovery.md)에서 확인한다.
+
 ### 11. 컨테이너 종료
 
 ```bash
@@ -575,7 +573,6 @@ docker compose down
 
 다음 순서로 프로젝트를 확장한다.
 
-1. 환경설정 및 데이터베이스 연결 코드 분리
-2. Metabase 대시보드 구성
-3. 모니터링과 장애 테스트
-4. 프로젝트 트러블슈팅과 설계 결정 문서화
+1. 모니터링과 장애 테스트
+2. 프로젝트 트러블슈팅과 설계 결정 문서화
+3. 환경설정 및 데이터베이스 연결 코드 분리

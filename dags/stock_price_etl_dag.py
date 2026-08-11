@@ -27,7 +27,9 @@ SLACK_FAILURE_NOTIFIER = SlackWebhookNotifier(
         "*Run*: `{{ run_id }}`\n"
         "*Task*: `{{ task_instance.task_id }}`\n"
         "*시도 횟수*: `{{ task_instance.try_number }}`\n"
-        "*오류*: `{{ exception }}`\n"
+        # DAG 최종 실패 콜백에는 exception이 없을 수 있으므로 DAG 상태를 사용한다.
+        # 상세 예외는 아래 Task 로그 링크에서 확인한다.
+        "*상태*: `{{ dag_run.state }}`\n"
         "<{{ task_instance.log_url }}|Airflow Task 로그 열기>"
     ),
 )
@@ -47,9 +49,10 @@ SLACK_FAILURE_NOTIFIER = SlackWebhookNotifier(
     default_args={
         # 최초 실행을 제외하고 최대 2회 다시 시도한다.
         "retries": 2,
-        "retry_delay": timedelta(minutes=10),
-        "retry_exponential_backoff": True,
-        "max_retry_delay": timedelta(minutes=30),
+        # 장애 감지까지 지나치게 오래 걸리지 않도록 2분 간격으로 고정한다.
+        # 계속 실패하면 최초 실패 후 약 4분 뒤 최종 실패 알림을 보낸다.
+        "retry_delay": timedelta(minutes=2),
+        "retry_exponential_backoff": False,
     },
     tags=["stock-price", "etl"],
     params={
