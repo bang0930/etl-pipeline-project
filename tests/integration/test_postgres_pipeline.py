@@ -28,15 +28,19 @@ pytestmark = [
 ]
 
 
-@pytest.fixture
-def postgres_conn():
-    conn = psycopg2.connect(
+def create_test_postgres_connection():
+    return psycopg2.connect(
         host=os.environ["POSTGRES_HOST"],
         port=os.environ["POSTGRES_PORT"],
         database=os.environ["POSTGRES_DB"],
         user=os.environ["POSTGRES_USER"],
         password=os.environ["POSTGRES_PASSWORD"],
     )
+
+
+@pytest.fixture
+def postgres_conn():
+    conn = create_test_postgres_connection()
 
     with conn.cursor() as cursor:
         cursor.execute(
@@ -274,6 +278,82 @@ def test_postgres_constraint_failure_rolls_back_staging_batch(
         )
         load_stock_prices(postgres_conn, invalid_items)
     postgres_conn.rollback()
+
+    with postgres_conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT COUNT(*) FROM staging.stock_prices "
+            "WHERE base_date = %s",
+            (date(2023, 6, 1),),
+        )
+        staging_count = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT COUNT(*) FROM mart.daily_stock_rankings "
+            "WHERE base_date = %s",
+            (date(2023, 6, 1),),
+        )
+        mart_count = cursor.fetchone()[0]
+
+    assert staging_count == 3
+    assert mart_count == 3
+
+
+def test_postgres_connection_loss_rolls_back_snapshot_replacement(
+    postgres_conn,
+    stock_item,
+    api_response_factory,
+):
+    run_id = save_test_raw_batch(
+        postgres_conn,
+        stock_item,
+        api_response_factory,
+        run_id="integration-run-connection-loss",
+    )
+    postgres_conn.commit()
+
+    transformed_items = transform_stock_prices(
+        postgres_conn,
+        run_id,
+        date(2023, 6, 1),
+    )
+    replace_daily_snapshot(postgres_conn, transformed_items)
+    postgres_conn.commit()
+
+    # Snapshot 교체 트랜잭션을 실행할 별도 DB 세션을 만든다.
+    # DELETE는 수행하되 commit 전에 세션을 종료해 실제 연결 장애를 재현한다.
+    interrupted_conn = create_test_postgres_connection()
+    controller_conn = create_test_postgres_connection()
+
+    try:
+        with interrupted_conn.cursor() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            interrupted_backend_pid = cursor.fetchone()[0]
+
+        delete_daily_stock_rankings_for_date(
+            interrupted_conn,
+            date(2023, 6, 1),
+        )
+        delete_stock_prices_for_date(
+            interrupted_conn,
+            date(2023, 6, 1),
+        )
+
+        with controller_conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_terminate_backend(%s)",
+                (interrupted_backend_pid,),
+            )
+            assert cursor.fetchone()[0] is True
+        controller_conn.commit()
+
+        # 종료된 세션에서는 commit할 수 없어야 하며, PostgreSQL은 해당 세션의
+        # 미완료 DELETE 전체를 자동으로 rollback한다.
+        with pytest.raises(
+            (psycopg2.OperationalError, psycopg2.InterfaceError)
+        ):
+            interrupted_conn.commit()
+    finally:
+        interrupted_conn.close()
+        controller_conn.close()
 
     with postgres_conn.cursor() as cursor:
         cursor.execute(
