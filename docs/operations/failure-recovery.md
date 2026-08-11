@@ -8,6 +8,22 @@ Metabase 장애를 안전하게 재현하고 복구하는 절차를 기록한다
 장애 테스트에서는 실제 인증키, 데이터베이스 비밀번호와 Slack Webhook을
 출력하지 않는다. 개발 데이터가 저장된 Docker Volume은 삭제하지 않는다.
 
+## 검증 요약
+
+| 시나리오 | 검증 결과 | 근거 |
+| --- | --- | --- |
+| API Timeout | 통과 | 예외 변환, 민감정보 비노출 및 상위 계층 전달 테스트 |
+| API 비정상 JSON/XML 응답 | 통과 | 상태·Content-Type·제한된 본문을 포함한 오류 변환 테스트 |
+| PostgreSQL 연결 중단 | 통과 | 연결 종료 시 교체 트랜잭션 Rollback과 기존 Snapshot 보존 |
+| 페이지 중복·누락 | 통과 | Staging 게시 전 `PaginationConsistencyError` 발생 |
+| Airflow 최종 실패 | 통과 | 2분 간격 2회 재시도 후 약 4분 만에 최종 실패 |
+| Slack 실패 알림 | 통과 | 최종 실패 알림 1회 수신 및 Task 로그 링크 확인 |
+| PostgreSQL 복구 | 통과 | 동일 기준일 재실행 성공 및 Snapshot 일치 |
+| Airflow 재시작 | 통과 | DAG와 19개 실행 이력 유지 |
+| Metabase 재시작 | 통과 | 대시보드·질문·사용자·연결 Metadata 유지 |
+
+모든 검증은 `2026-08-11`에 수행했다.
+
 ## 자동화된 회귀 테스트
 
 ### API Timeout
@@ -23,6 +39,19 @@ pytest -q tests/test_extract.py
 ```
 
 검증 결과: `14 passed`
+
+### API 비정상 JSON/XML 응답
+
+`tests/test_extract.py`는 HTTP `200` 응답이 JSON 대신 XML 또는 텍스트를
+반환하는 상황을 재현해 다음 내용을 검증한다.
+
+- 일반적인 JSON 파싱 예외 대신 원인을 설명하는 `RuntimeError`가 발생한다.
+- HTTP 상태와 Content-Type이 오류에 포함된다.
+- 응답 본문은 한 줄로 정규화하고 최대 200자로 제한한다.
+- API 키와 전체 요청 URL은 오류에 포함하지 않는다.
+
+이 검증은 위 API Timeout 테스트와 함께 실행되며 결과는 `14 passed`에
+포함된다.
 
 ### PostgreSQL 연결 중단
 

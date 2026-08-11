@@ -43,7 +43,7 @@
 - [x] Airflow Docker 실행 환경 및 Metadata DB 구성
 - [x] 매일 19시 KST 자동 실행 Airflow TaskFlow DAG 구성
 - [x] Metabase 대시보드 구성
-- [ ] 모니터링, 장애 및 재시도 테스트
+- [x] 모니터링, 장애 및 재시도 테스트
 
 ## 데이터 소스
 
