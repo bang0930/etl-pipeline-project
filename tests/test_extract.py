@@ -61,6 +61,26 @@ def test_fetch_stock_price_page_converts_http_error(monkeypatch):
         extract_module.fetch_stock_price_page("20230601", 1)
 
 
+def test_fetch_stock_price_page_converts_timeout(monkeypatch):
+    monkeypatch.setenv("STOCK_API_BASE_URL", "https://example.test/api")
+    monkeypatch.setenv("STOCK_API_SERVICE_KEY", "test-service-key")
+    monkeypatch.setattr(
+        extract_module.requests,
+        "get",
+        Mock(side_effect=requests.Timeout("request details must stay hidden")),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        extract_module.fetch_stock_price_page("20230601", 3)
+
+    message = str(error.value)
+    assert "request timed out" in message
+    assert "base_date=20230601" in message
+    assert "page_no=3" in message
+    assert "timeout=10s" in message
+    assert "request details must stay hidden" not in message
+
+
 def test_fetch_stock_price_page_converts_non_json_response(monkeypatch):
     monkeypatch.setenv("STOCK_API_BASE_URL", "https://example.test/api")
     monkeypatch.setenv("STOCK_API_SERVICE_KEY", "test-service-key")

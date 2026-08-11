@@ -10,6 +10,7 @@ from psycopg2.extras import Json
 API_BASE_URL_ENV = "STOCK_API_BASE_URL"
 API_SERVICE_KEY_ENV = "STOCK_API_SERVICE_KEY"
 RESPONSE_BODY_PREVIEW_LENGTH = 200
+REQUEST_TIMEOUT_SECONDS = 10
 
 
 def get_stock_api_config():
@@ -45,17 +46,27 @@ def build_response_body_preview(response):
 def fetch_stock_price_page(base_date, page_no, num_of_rows=100):
     api_base_url, service_key = get_stock_api_config()
 
-    response = requests.get(
-        f"{api_base_url.rstrip('/')}/getStockPriceInfo",
-        params={
-            "serviceKey": service_key,
-            "numOfRows": num_of_rows,
-            "pageNo": page_no,
-            "resultType": "json",
-            "basDt": base_date,
-        },
-        timeout=10,
-    )
+    try:
+        response = requests.get(
+            f"{api_base_url.rstrip('/')}/getStockPriceInfo",
+            params={
+                "serviceKey": service_key,
+                "numOfRows": num_of_rows,
+                "pageNo": page_no,
+                "resultType": "json",
+                "basDt": base_date,
+            },
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+    except requests.Timeout:
+        # 인증키나 전체 요청 URL은 노출하지 않고 재실행에 필요한
+        # 기준일·페이지와 요청 제한시간만 오류에 남긴다.
+        raise RuntimeError(
+            "Stock price API request timed out: "
+            f"base_date={base_date}, "
+            f"page_no={page_no}, "
+            f"timeout={REQUEST_TIMEOUT_SECONDS}s"
+        ) from None
 
     try:
         response.raise_for_status()
