@@ -291,6 +291,8 @@ docker compose ps
 - `airflow-scheduler`
 - `airflow-dag-processor`
 - `airflow-triggerer`
+- `metabase-postgres`
+- `metabase`
 
 Airflow UI는 [http://localhost:8080](http://localhost:8080)에서 확인한다. `stock_price_etl` DAG는 매일 한국시간 19시에 자동 실행한다. 외부 API 데이터가 기준일 다음 영업일 오후 1시 이후 공개되므로, 실행일 전날부터 역순으로 조회하여 API가 보유한 가장 최근 거래일을 선택한다.
 
@@ -303,7 +305,36 @@ docker compose exec airflow-api-server \
 
 PostgreSQL 초기화 SQL은 데이터 볼륨을 처음 생성할 때만 자동 실행된다. 기존 볼륨에 새 변경 SQL을 추가한 경우 해당 SQL을 별도로 적용해야 한다.
 
-### 4. Airflow DAG 자동·수동 실행
+### 4. Metabase 초기 설정
+
+Metabase UI는 [http://localhost:3000](http://localhost:3000)에서 확인한다. 최초 실행 시 관리자 계정을 만드는 초기 설정 화면이 표시된다.
+
+Metabase 계정, 질문과 대시보드 설정은 `metabase-postgres`의 별도 Metadata DB에 저장된다. ETL 데이터가 저장된 `postgres` 서비스와 데이터베이스 및 Volume을 공유하지 않는다.
+
+`metabase-reader-init` 서비스는 ETL PostgreSQL에 `mart` 스키마만 조회할 수 있는 계정을 생성한 뒤 종료된다. `docker compose ps -a metabase-reader-init`에서 종료 코드가 `0`인지 확인한다. 이 서비스는 멱등하게 작성되어 기존 데이터 볼륨에서도 안전하게 다시 실행할 수 있다.
+
+최초 관리자 계정을 만든 뒤 **데이터베이스 추가** 화면에서 다음 값으로 ETL PostgreSQL을 연결한다.
+
+| 항목 | 값 |
+| --- | --- |
+| 데이터베이스 유형 | PostgreSQL |
+| 표시 이름 | `Stock Price Mart` |
+| 호스트 | `postgres` |
+| 포트 | `5432` |
+| 데이터베이스 이름 | `.env`의 `POSTGRES_DB` |
+| 사용자 이름 | `.env`의 `METABASE_ETL_DB_USER` |
+| 비밀번호 | `.env`의 `METABASE_ETL_DB_PASSWORD` |
+| SSL | 비활성화 |
+
+호스트에는 `localhost`가 아니라 Docker Compose 서비스명인 `postgres`를 입력한다. 읽기 전용 계정은 `mart` 스키마의 테이블만 조회할 수 있고 Raw·Staging 조회 또는 데이터 변경 권한은 갖지 않는다.
+
+Metabase 로그는 다음 명령으로 확인한다.
+
+```bash
+docker compose logs -f metabase metabase-postgres
+```
+
+### 5. Airflow DAG 자동·수동 실행
 
 자동 실행 정책은 다음과 같다.
 
@@ -394,7 +425,7 @@ extract_and_validate_raw
 - API 결과가 0건이면 기존 Staging·Mart를 보존하고 이후 검증도 건너뛴 상태로 정상 종료한다.
 - TaskFlow의 XCom에는 `run_id`, 기준일, 상태와 처리 건수만 전달하며 API payload와 변환 행 전체는 전달하지 않는다.
 
-### 5. ETL 및 품질 검증 CLI 통합 실행
+### 6. ETL 및 품질 검증 CLI 통합 실행
 
 단일 기준일을 실행할 때는 수집 기준일과 페이지당 요청 건수를 전달한다.
 
@@ -434,7 +465,7 @@ Raw 단계 실패 시 Raw 트랜잭션을 Rollback한다. 이후 단계가 실�
 
 API가 정상 응답했지만 item이 0건인 날짜는 Raw 수집 이력만 보존하고 기존 Staging·Mart 데이터는 삭제하지 않는다. 기간 실행 중 한 날짜가 실패하면 그 날짜는 Rollback하고 실행을 중단하며, 앞선 날짜에서 이미 완료된 결과는 유지한다.
 
-### 6. 단위 테스트
+### 7. 단위 테스트
 
 ```bash
 pytest -q
@@ -442,7 +473,7 @@ pytest -q
 
 로컬 단위 테스트에서는 실제 PostgreSQL 통합 테스트를 자동으로 건너뛴다.
 
-### 7. PostgreSQL 통합 테스트
+### 8. PostgreSQL 통합 테스트
 
 ```bash
 ./scripts/test-postgres.sh
@@ -458,7 +489,7 @@ pytest -q
 
 테스트 DB는 호스트의 `5434` 포트를 사용하며 개발 DB의 데이터와 Volume을 공유하지 않는다.
 
-### 8. 적재 결과 확인
+### 9. 적재 결과 확인
 
 ```sql
 SELECT
@@ -480,7 +511,7 @@ Raw 출처 페이지 수: 28
 
 같은 기준일을 재수집하면 Staging과 Mart가 최신 수집 결과로 교체되며, 이전 수집에만 존재했던 종목은 남지 않는다.
 
-### 9. 로그 확인
+### 10. 로그 확인
 
 ```bash
 docker compose logs -f
@@ -496,13 +527,13 @@ docker compose logs -f \
   airflow-triggerer
 ```
 
-### 10. 컨테이너 종료
+### 11. 컨테이너 종료
 
 ```bash
 docker compose down
 ```
 
-`docker compose down`만 실행하면 ETL PostgreSQL과 Airflow Metadata DB의 Docker Volume은 유지된다. `docker compose down --volumes`를 실행하면 두 데이터베이스의 데이터가 모두 삭제되므로 주의한다.
+`docker compose down`만 실행하면 ETL PostgreSQL, Airflow Metadata DB와 Metabase Metadata DB의 Docker Volume은 유지된다. `docker compose down --volumes`를 실행하면 세 데이터베이스의 데이터가 모두 삭제되므로 주의한다.
 
 ## 환경변수
 
@@ -523,6 +554,12 @@ docker compose down
 | `AIRFLOW_ADMIN_PASSWORD` | Airflow UI 관리자 비밀번호 |
 | `AIRFLOW_FERNET_KEY` | Airflow Connection 등 암호화에 사용하는 키 |
 | `AIRFLOW_API_JWT_SECRET` | Airflow 내부 Execution API JWT 서명 키 |
+| `METABASE_POSTGRES_DB` | Metabase Metadata DB 이름 |
+| `METABASE_POSTGRES_USER` | Metabase Metadata DB 사용자 |
+| `METABASE_POSTGRES_PASSWORD` | Metabase Metadata DB 비밀번호 |
+| `METABASE_SITE_NAME` | Metabase UI에 표시할 사이트 이름 |
+| `METABASE_ETL_DB_USER` | Metabase에서 ETL Mart를 조회할 읽기 전용 사용자 |
+| `METABASE_ETL_DB_PASSWORD` | Metabase ETL 읽기 전용 사용자의 비밀번호 |
 
 실제 `.env` 파일은 Git으로 추적하지 않는다. 저장소에는 변수명만 제공하는 `.env.example`만 포함한다.
 
