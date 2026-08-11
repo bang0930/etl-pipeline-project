@@ -586,3 +586,41 @@ def test_main_preserves_existing_snapshot_when_api_returns_zero_items(monkeypatc
     main_module.main()
 
     assert events == ["commit", "rollback", "close"]
+
+
+def test_verify_published_snapshot_rolls_back_and_reraises_validation_error(
+    monkeypatch,
+):
+    """최종 게시 검증 실패 시 읽기 트랜잭션을 종료하고 실패를 전파한다."""
+    events = []
+    conn = FakeConnection(events)
+    publish_metadata = {
+        "run_id": "run-verify-fail",
+        "base_date": "2023-06-01",
+        "status": "published",
+        "staging_row_count": 3,
+        "mart_row_count": 3,
+    }
+
+    def failing_published_validation(conn, base_date, expected_row_count):
+        events.append(
+            ("validate_published", base_date, expected_row_count)
+        )
+        raise ValueError("published snapshot validation failed")
+
+    monkeypatch.setattr(
+        main_module,
+        "validate_published_snapshot",
+        failing_published_validation,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="published snapshot validation failed",
+    ):
+        main_module.verify_published_snapshot(conn, publish_metadata)
+
+    assert events == [
+        ("validate_published", date(2023, 6, 1), 3),
+        "rollback",
+    ]
