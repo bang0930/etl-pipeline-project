@@ -84,22 +84,27 @@ flowchart LR
 
     TRANSFORM["Transform·Validation<br/>Python"]
     LOAD["기준일 스냅샷 교체<br/>Python·SQL"]
-    METABASE["Metabase<br/>(예정)"]
+    AIRFLOW["Airflow<br/>스케줄·재시도·실행 이력"]
+    METABASE["Metabase<br/>조회·대시보드"]
+    SLACK["Slack<br/>최종 실패 알림"]
 
+    AIRFLOW --> EXTRACT
     SOURCE --> EXTRACT
     EXTRACT --> RAW
     RAW --> TRANSFORM
     TRANSFORM --> LOAD
     LOAD --> STAGING
     STAGING --> MART
-    MART -. "조회·시각화 예정" .-> METABASE
+    MART --> METABASE
+    AIRFLOW -. "최종 실패" .-> SLACK
 ```
 
-- Docker Compose는 Python 애플리케이션과 PostgreSQL의 실행 환경을 구성한다.
+- Docker Compose는 ETL 애플리케이션, PostgreSQL, Airflow와 Metabase의 실행 환경을 구성한다.
 - Extract는 외부 API를 페이지 단위로 호출하고 전체 응답을 Raw 계층에 저장한다.
 - 통합 실행 코드는 API 수집부터 Raw·Staging·Mart 적재와 품질 검증까지 수행한다.
 - Airflow TaskFlow DAG는 Extract, 기준일 스냅샷 게시와 최종 검증을 작업별로 실행하고 상태와 로그를 관리한다.
-- Metabase는 Mart 데이터를 조회하여 최종 결과를 시각화할 예정이다.
+- Metabase는 읽기 전용 PostgreSQL 계정으로 Mart 데이터를 조회하여 일별 시장 현황과 순위, 최근 거래일 추이를 시각화한다.
+- Airflow가 모든 재시도를 소진하면 Slack으로 실패 상태와 Task 로그 링크를 전송한다.
 
 현재 `main.py` CLI와 Airflow DAG는 동일한 Python ETL 함수를 재사용한다. 대량 데이터는 PostgreSQL에 두고 Airflow Task 간에는 `run_id`, 기준일과 처리 건수 등 작은 메타데이터만 전달한다.
 
@@ -190,7 +195,7 @@ base_date × isin_code
 | Python 3.11 | ETL 로직 및 통합 실행 구현 |
 | PostgreSQL 16 | Raw·Staging·Mart 데이터 저장소 |
 | Docker | 서비스별 실행 환경 구성 |
-| Docker Compose | Python 애플리케이션과 PostgreSQL 실행 관리 |
+| Docker Compose | ETL·PostgreSQL·Airflow·Metabase 서비스 실행 관리 |
 | requests | 공공데이터 API 요청 |
 | psycopg2 | PostgreSQL 연결, 트랜잭션 및 Batch Insert |
 | python-dotenv | 로컬 환경변수 로딩 |
@@ -227,7 +232,9 @@ etl-pipeline-project/
 │       ├── 001_create_schemas.sql
 │       ├── 002_create_raw_tables.sql
 │       ├── 003_create_staging_tables.sql
-│       └── 004_alter_stock_price_short_code_constraint.sql
+│       ├── 004_alter_stock_price_short_code_constraint.sql
+│       ├── 005_create_mart_tables.sql
+│       └── 006_create_metabase_reader.sh
 ├── docker/
 │   ├── Dockerfile
 │   ├── airflow.Dockerfile
@@ -237,6 +244,10 @@ etl-pipeline-project/
 ├── config/
 ├── scripts/
 │   └── test-postgres.sh
+├── docs/
+│   ├── operations/
+│   │   └── failure-recovery.md
+│   └── Metabase - Daily Stock Market Overview.pdf
 ├── tests/
 │   ├── integration/
 │   │   └── test_postgres_pipeline.py
@@ -306,6 +317,8 @@ Metabase UI는 [http://localhost:3000](http://localhost:3000)에서 확인한다
 
 Metabase 계정, 질문과 대시보드 설정은 `metabase-postgres`의 별도 Metadata DB에 저장된다. ETL 데이터가 저장된 `postgres` 서비스와 데이터베이스 및 Volume을 공유하지 않는다.
 
+완성된 대시보드 구성과 조회 결과는 [Metabase 대시보드 문서](<docs/Metabase - Daily Stock Market Overview.pdf>)에서 확인할 수 있다.
+
 `metabase-reader-init` 서비스는 ETL PostgreSQL에 `mart` 스키마만 조회할 수 있는 계정을 생성한 뒤 종료된다. `docker compose ps -a metabase-reader-init`에서 종료 코드가 `0`인지 확인한다. 이 서비스는 멱등하게 작성되어 기존 데이터 볼륨에서도 안전하게 다시 실행할 수 있다.
 
 최초 관리자 계정을 만든 뒤 **데이터베이스 추가** 화면에서 다음 값으로 ETL PostgreSQL을 연결한다.
@@ -354,7 +367,7 @@ Slack 알림을 사용하려면 먼저 Slack 채널에 Incoming Webhook을 생�
 | Connection Type | `Slack Incoming Webhook` |
 | Password | Slack에서 발급한 전체 Webhook URL |
 
-Webhook URL은 비밀값이므로 코드, `.env.example`, Git 저장소에 기록하지 않는다. Connection은 Airflow Metadata DB에 저장되고 `AIRFLOW_FERNET_KEY`로 암호화된다. 설정 후 테스트용 DAG 실패를 발생시키기 전에는 Webhook URL이 포함되지 않는 DAG 로딩 및 콜백 구성 테스트만 수행한다.
+Webhook URL은 비밀값이므로 코드, `.env.example`, Git 저장소에 기록하지 않는다. Connection은 Airflow Metadata DB에 저장되고 `AIRFLOW_FERNET_KEY`로 암호화된다. 실제 장애 테스트에서 모든 재시도 소진 후 Slack 알림이 한 번 전송되고 Task 로그 링크가 정상적으로 제공되는 것을 확인했다.
 
 특정 날짜를 다시 실행할 때는 Airflow UI에서 `stock_price_etl` DAG를 선택하고 Trigger 화면에 다음 값을 입력한다.
 
@@ -563,16 +576,20 @@ docker compose down
 
 ## 현재 제약사항
 
-- 외부 API 호출 재시도 정책이 아직 없다.
+- `requests` 호출 자체에는 재시도 어댑터가 없으며, 일시적인 API 장애는 Airflow Task 단위 재시도로 처리한다.
 - Airflow DAG는 과거 누락 구간을 자동 생성하지 않으며, 기간 재처리는 명시적 Backfill 명령으로 실행한다.
 - DB 초기화 SQL과 기존 DB 변경을 위한 마이그레이션이 분리되어 있지 않다.
-- 실행 로그가 표준 출력으로만 제공된다.
+- Docker와 Airflow 로컬 로그를 사용하며 별도의 중앙 로그 수집 플랫폼은 구성하지 않았다.
 - Slack Connection을 등록하지 않은 환경에서는 실패 알림을 전송할 수 없다.
 
-## 향후 계획
+## 후속 확장 후보
 
-다음 순서로 프로젝트를 확장한다.
+이 저장소는 주식시세 배치 ETL 파이프라인의 전체 흐름을 완성하는 범위에서
+마무리한다. 다음 기술은 현재 구조에 단순히 추가하지 않고, 데이터 규모와
+처리 방식에 실제 필요성이 생길 때 별도 프로젝트 또는 후속 저장소에서 검토한다.
 
-1. 모니터링과 장애 테스트
-2. 프로젝트 트러블슈팅과 설계 결정 문서화
-3. 환경설정 및 데이터베이스 연결 코드 분리
+- Kafka 기반 실시간 데이터 수집
+- dbt 기반 SQL Transform과 계보 관리
+- Great Expectations 기반 데이터 품질 리포트
+- Spark 기반 분산 대용량 처리
+- 클라우드 환경 배포와 중앙 모니터링
