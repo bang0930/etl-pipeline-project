@@ -311,7 +311,24 @@ Metabase UI는 [http://localhost:3000](http://localhost:3000)에서 확인한다
 
 Metabase 계정, 질문과 대시보드 설정은 `metabase-postgres`의 별도 Metadata DB에 저장된다. ETL 데이터가 저장된 `postgres` 서비스와 데이터베이스 및 Volume을 공유하지 않는다.
 
-초기 관리자 계정 생성과 ETL PostgreSQL 연결은 후속 단계에서 진행한다. Metabase 로그는 다음 명령으로 확인한다.
+`metabase-reader-init` 서비스는 ETL PostgreSQL에 `mart` 스키마만 조회할 수 있는 계정을 생성한 뒤 종료된다. `docker compose ps -a metabase-reader-init`에서 종료 코드가 `0`인지 확인한다. 이 서비스는 멱등하게 작성되어 기존 데이터 볼륨에서도 안전하게 다시 실행할 수 있다.
+
+최초 관리자 계정을 만든 뒤 **데이터베이스 추가** 화면에서 다음 값으로 ETL PostgreSQL을 연결한다.
+
+| 항목 | 값 |
+| --- | --- |
+| 데이터베이스 유형 | PostgreSQL |
+| 표시 이름 | `Stock Price Mart` |
+| 호스트 | `postgres` |
+| 포트 | `5432` |
+| 데이터베이스 이름 | `.env`의 `POSTGRES_DB` |
+| 사용자 이름 | `.env`의 `METABASE_ETL_DB_USER` |
+| 비밀번호 | `.env`의 `METABASE_ETL_DB_PASSWORD` |
+| SSL | 비활성화 |
+
+호스트에는 `localhost`가 아니라 Docker Compose 서비스명인 `postgres`를 입력한다. 읽기 전용 계정은 `mart` 스키마의 테이블만 조회할 수 있고 Raw·Staging 조회 또는 데이터 변경 권한은 갖지 않는다.
+
+Metabase 로그는 다음 명령으로 확인한다.
 
 ```bash
 docker compose logs -f metabase metabase-postgres
@@ -541,6 +558,8 @@ docker compose down
 | `METABASE_POSTGRES_USER` | Metabase Metadata DB 사용자 |
 | `METABASE_POSTGRES_PASSWORD` | Metabase Metadata DB 비밀번호 |
 | `METABASE_SITE_NAME` | Metabase UI에 표시할 사이트 이름 |
+| `METABASE_ETL_DB_USER` | Metabase에서 ETL Mart를 조회할 읽기 전용 사용자 |
+| `METABASE_ETL_DB_PASSWORD` | Metabase ETL 읽기 전용 사용자의 비밀번호 |
 
 실제 `.env` 파일은 Git으로 추적하지 않는다. 저장소에는 변수명만 제공하는 `.env.example`만 포함한다.
 

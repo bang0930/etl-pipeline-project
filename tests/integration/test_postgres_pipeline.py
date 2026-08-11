@@ -122,6 +122,39 @@ def replace_daily_snapshot(conn, transformed_items):
     return loaded_count, quality_result, mart_rows
 
 
+def test_metabase_reader_has_mart_only_read_permissions(postgres_conn):
+    with postgres_conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                has_schema_privilege(
+                    'metabase_reader', 'mart', 'USAGE'
+                ),
+                has_table_privilege(
+                    'metabase_reader',
+                    'mart.daily_stock_rankings',
+                    'SELECT'
+                ),
+                has_schema_privilege(
+                    'metabase_reader', 'staging', 'USAGE'
+                ),
+                has_table_privilege(
+                    'metabase_reader',
+                    'staging.stock_prices',
+                    'SELECT'
+                ),
+                has_table_privilege(
+                    'metabase_reader',
+                    'mart.daily_stock_rankings',
+                    'INSERT'
+                )
+            """
+        )
+        permission_flags = cursor.fetchone()
+
+    assert permission_flags == (True, True, False, False, False)
+
+
 def test_postgres_recollection_replaces_staging_and_mart_snapshot(
     postgres_conn,
     stock_item,
